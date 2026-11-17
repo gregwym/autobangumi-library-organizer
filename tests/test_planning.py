@@ -1,0 +1,161 @@
+from pathlib import Path
+
+import pytest
+
+from library_organizer.models import Mapping, Options
+from library_organizer.planner import build, contained, episode, fingerprint
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "[Group] Hibike! Euphonium 3 [NCOP].mkv",
+        "SPs/[Group] Hibike! Euphonium 3 [Making01].mkv",
+        "[Group] Hibike! Euphonium 3.mkv",
+        "Show - 12.5.mkv",
+        "Show S01E12.5.mkv",
+    ],
+)
+def test_never_interpret_season_or_decimal_as_episode(name):
+    assert episode(name) is None
+
+
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("Show - 26v2 [1080p].mkv", 26),
+        ("Show [13].mkv", 13),
+        ("Show S03E02.mkv", 2),
+        ("Show 第4话.mkv", 4),
+    ],
+)
+def test_explicit_episode(name, expected):
+    assert episode(name) == expected
+
+
+def fixture(tmp_path, names):
+    src = tmp_path / "downloads"
+    src.mkdir()
+    lib = tmp_path / "library"
+    files = []
+    for i, name in enumerate(names):
+        p = src / name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"content")
+        files.append(
+            {
+                "index": i,
+                "name": name,
+                "source": str(p),
+                "fingerprint": fingerprint(p),
+                "progress": 1,
+            }
+        )
+    task = {"key": "a" * 32, "name": "[Group] Show [1080p]", "files": files}
+    opts = Options(source_root=str(src), library_root=str(lib))
+    return task, opts
+
+
+def test_all_resources_and_precise_subtitle_pairing(tmp_path):
+    task, opts = fixture(
+        tmp_path,
+        [
+            "[Group] Show - 01 [1080p].mkv",
+            "[Group] Show - 01 [1080p].chs.ass",
+            "SPs/[Group] Show [NCOP].mkv",
+            "Fonts/font.ttf",
+            "release.nfo",
+        ],
+    )
+    plan = build(
+        task, Mapping(tmdb_id=9, season=3), {"title": "Show", "year": "2020", "episodes": [1]}, opts
+    )
+    assert all(i["target"] for i in plan)
+    assert "S03E01" in plan[0]["target"]
+    assert plan[1]["target"] == str(Path(plan[0]["target"]).with_suffix("")) + ".zh-Hans.ass"
+    assert "/extras/" in plan[2]["target"]
+    assert Path(plan[2]["target"]).parent.name == "extras"
+    assert "/_resources/" in plan[3]["target"]
+    assert "/_resources/" in plan[4]["target"]
+    assert all(Path(f["source"]).exists() for f in task["files"])
+
+
+def test_sp_requires_explicit_tmdb_mapping(tmp_path):
+    task, opts = fixture(tmp_path, ["SPs/Show [01].mkv"])
+    plan = build(
+        task,
+        Mapping(tmdb_id=1, season=0, episodes={"SPs/Show [01].mkv": 5}),
+        {"title": "Show", "episodes": [5]},
+        opts,
+    )
+    assert "S00E05" in plan[0]["target"]
+
+
+def test_movie_requires_explicit_main_when_ambiguous(tmp_path):
+    task, opts = fixture(tmp_path, ["MovieA.mkv", "MovieB.mkv"])
+    metadata = {"title": "Movie", "year": "2020", "episodes": []}
+    assert all(
+        not i["target"] for i in build(task, Mapping(media_type="movie", tmdb_id=1), metadata, opts)
+    )
+    plan = build(
+        task, Mapping(media_type="movie", tmdb_id=1, main_file="MovieA.mkv"), metadata, opts
+    )
+    assert Path(plan[0]["target"]).name.startswith(Path(plan[0]["target"]).parent.name)
+    assert "/extras/" in plan[1]["target"]
+
+
+def test_collision_is_held_before_execution(tmp_path):
+    task, opts = fixture(tmp_path, ["[A] Show - 01.mkv", "[B] Show - 01.mkv"])
+    opts.version_suffix = False
+    plan = build(task, Mapping(tmdb_id=1), {"title": "Show", "episodes": [1]}, opts)
+    assert all(not p["target"] and "同一目标" in p["reason"] for p in plan)
+
+
+def test_tmdb_bounds_and_offset(tmp_path):
+    task, opts = fixture(tmp_path, ["Show - 26.mkv"])
+    assert (
+        build(task, Mapping(tmdb_id=1), {"title": "Show", "episodes": [1]}, opts)[0]["target"]
+        is None
+    )
+    assert (
+        "S01E01"
+        in build(
+            task, Mapping(tmdb_id=1, episode_offset=-25), {"title": "Show", "episodes": [1]}, opts
+        )[0]["target"]
+    )
+
+
+def test_paths_cannot_escape(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError):
+        contained(root, root / "link" / "file")
+    with pytest.raises(ValueError):
+        contained(root, root / ".." / "file")
+    with pytest.raises(ValueError):
+        Options(source_root=str(root), library_root=str(root / "lib"))
+
+
+def test_unknown_subtitle_not_guessed(tmp_path):
+    task, opts = fixture(tmp_path, ["Show - 01.mkv", "a.ass"])
+    plan = build(task, Mapping(tmdb_id=1), {"title": "Show", "episodes": [1]}, opts)
+    assert plan[1]["target"] is None
+
+
+@pytest.mark.parametrize("name", ["Show S01E01-E02.mkv", "Show S01E01-02.mkv", "Show [01-12].mkv"])
+def test_episode_ranges_are_not_collapsed(name):
+    assert episode(name) is None
+
+
+def test_movie_main_override_can_rescue_a_classified_extra(tmp_path):
+    task, opts = fixture(tmp_path, ["extras/Film.mkv"])
+    plan = build(
+        task,
+        Mapping(media_type="movie", tmdb_id=1, main_file="extras/Film.mkv"),
+        {"title": "Film", "episodes": []},
+        opts,
+    )
+    assert plan[0]["identity"] == {"media_type": "movie", "tmdb_id": 1}

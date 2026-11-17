@@ -1,0 +1,46 @@
+const css=`:host{display:block;font:14px/1.5 var(--ab-font-family,system-ui);color:var(--ab-color-text,#222)}*{box-sizing:border-box}details{border:1px solid var(--ab-color-border,#ddd);border-radius:var(--ab-radius-md,8px);overflow:hidden}summary{padding:7px 14px;font-weight:600;cursor:pointer;color:var(--ab-color-text-secondary,#666)}.body{padding:14px;background:var(--ab-color-surface,#fff);border-top:1px solid var(--ab-color-border,#ddd)}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}input,select,button,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--ab-color-border,#aaa);border-radius:6px;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.primary{background:var(--ab-color-primary,#5274d9);color:white}label{display:grid;gap:5px;margin:8px 0}label:has(input[type=checkbox]){display:flex;align-items:center;gap:8px}input[type=checkbox]{width:auto;margin:0;accent-color:var(--ab-color-primary,#526fe4)}select,textarea{max-width:100%;width:100%}textarea{min-height:70px}small,.muted{color:var(--ab-color-text-secondary,#777)}.plan{max-height:400px;overflow:auto}.item{border-bottom:1px solid var(--ab-color-border,#ddd);padding:9px 0;overflow-wrap:anywhere}#message{white-space:pre-wrap;margin-top:10px}.badge{border-radius:999px;padding:2px 9px;background:#8882}.error{color:#c65540}[hidden]{display:none!important}`;
+class Organizer extends HTMLElement {
+  connectedCallback(){
+    if(!this.shadowRoot)this.attachShadow({mode:'open'});
+    this.shadowRoot.innerHTML=`<style>${css}</style><details open><summary>媒体库整理</summary><div class="body">
+      <p>按 TMDB 创建媒体库硬链，下载目录保留原名。先在插件配置中填写下载根目录、媒体库根目录及路径映射。</p>
+      <div class="row"><span id="state" class="badge"></span><button id="scan">扫描下载</button><button id="activate">接管整理</button><label><input id="automatic" type="checkbox">自动整理已绑定任务</label></div>
+      <small>接管会备份配置并关闭 AB 原生整理及原生硬链。停止自动整理后，已建立的链接仍保留。</small>
+      <label>下载任务<select id="task"><option>请先扫描</option></select></label>
+      <div id="mapping" hidden>
+        <div class="row"><label>类型<select id="type"><option value="tv">剧集</option><option value="movie">电影</option></select></label><label>搜索名称<input id="query"></label><button id="search">搜索 TMDB</button></div>
+        <label>TMDB 条目<select id="matches"><option value="">请搜索</option></select></label>
+        <div class="row"><label>TMDB ID<input id="tmdb" type="number" min="1"></label><label>季<input id="season" type="number" value="1" min="0"></label><label>集数偏移<input id="offset" type="number" value="0"></label></div>
+        <label><input id="future" type="checkbox">应用到同一 AB 规则的后续任务（需唯一关联）</label>
+        <details><summary>逐文件映射</summary><div class="body"><small>用完整源文件名指定 TMDB 集号；特别篇请绑定第 0 季。留空时自动解析明确的集数。</small><p class="muted">文件集号（留空则自动识别）</p><div id="episodes" class="plan"></div><label>电影正片<select id="main"><option value="">自动（仅单一候选时）</option></select></label></div></details>
+        <div class="row"><button id="save">保存映射</button></div>
+      </div>
+      <div class="row"><button id="preview">预览全部整理计划</button><button id="apply" class="primary" disabled>执行此计划</button><button id="refresh">刷新 Jellyfin</button><button id="verify">核对 Jellyfin 识别</button></div>
+      <div id="plan" class="plan"></div><div id="message" role="status"></div>
+      <div class="row"><span id="version"></span><button id="check">检查更新</button><button id="update" hidden></button></div><small>每 6 小时自动检查新版，点击一次更新；更新前备份状态，启动失败恢复旧代码。</small>
+    </div></details>`;
+    this.$=id=>this.shadowRoot.getElementById(id);
+    this.$('scan').onclick=()=>this.run(()=>this.scan());
+    this.$('task').onchange=()=>this.choose();
+    this.$('activate').onclick=()=>{if(window.confirm('接管媒体库整理？将备份配置并关闭原生整理和硬链；本操作不会立即创建媒体链接。'))this.run(async()=>{await this.host.api.post('activate',{});await this.status();});};
+    this.$('automatic').onchange=()=>this.run(async()=>{await this.host.api.post('automatic',{enabled:this.$('automatic').checked});await this.status();});
+    this.$('search').onclick=()=>this.run(async()=>{const rows=await this.host.api.get(`search?query=${encodeURIComponent(this.$('query').value)}&kind=${this.$('type').value}`);this.$('matches').replaceChildren(new Option('请选择',''),...rows.map(r=>new Option(`${r.title} (${r.year}) [${r.id}]`,r.id)));});
+    this.$('matches').onchange=()=>{this.$('tmdb').value=this.$('matches').value;};
+    this.$('save').onclick=()=>this.run(async()=>{const t=this.selected();await this.host.api.post('binding',{task_key:t.key,rule_id:this.$('future').checked?t.rule_id:null,mapping:{media_type:this.$('type').value,tmdb_id:Number(this.$('tmdb').value),season:Number(this.$('season').value),episode_offset:Number(this.$('offset').value),episodes:Object.fromEntries([...this.$('episodes').querySelectorAll('input')].filter(i=>i.value!=='').map(i=>[i.dataset.file,Number(i.value)])),main_file:this.$('main').value||null}});this.$('apply').disabled=true;await this.scan();this.message('映射已保存，请重新预览。');});
+    this.$('preview').onclick=()=>this.run(async()=>{this.$('apply').disabled=true;const p=await this.host.api.post('preview',{});this.token=p.token;this.$('plan').replaceChildren(...p.items.map(i=>{const el=document.createElement('div');el.className='item';el.textContent=`${i.name}\n→ ${i.target||i.reason}${i.old_targets?.length?'\n旧链接：'+i.old_targets.join(', ')+'（新链接验证后，仅清理本插件管理的链接）':''}`;el.style.whiteSpace='pre-wrap';return el;}));this.$('apply').disabled=!p.linkable;this.message(`${p.linkable} 个可建立链接，${p.held} 个待确认。`);});
+    this.$('apply').onclick=()=>this.run(async()=>{this.$('apply').disabled=true;const r=await this.host.api.post('apply',{token:this.token});const counts={};for(const x of r.results)counts[x.state]=(counts[x.state]||0)+1;this.message(JSON.stringify(counts)+'\n'+r.jellyfin+'\n'+r.results.filter(x=>x.state==='failed').map(x=>x.detail).join('\n'));});
+    this.$('refresh').onclick=()=>this.run(async()=>this.message((await this.host.api.post('jellyfin/refresh',{})).status));
+    this.$('verify').onclick=()=>this.run(async()=>{const rows=await this.host.api.post('jellyfin/verify',{});this.message(rows.length?rows.map(r=>r.state+' · '+r.path+' · '+r.detail).join('\n'):'暂无已执行的正片映射可核对');});
+    this.$('check').onclick=()=>this.run(async()=>this.updateStatus(await this.host.api.post('update/check',{})));
+    this.$('update').onclick=()=>this.run(async()=>{this.message('正在备份并更新…');await this.host.api.post('update/install',{version:this.latest});window.location.reload();});
+    this.run(()=>this.status());
+  }
+  message(s,error=false){this.$('message').textContent=s;this.$('message').className=error?'error':'';}
+  async run(fn){if(this.busy)return;this.busy=true;const buttons=[...this.shadowRoot.querySelectorAll('button')];const disabled=buttons.map(b=>b.disabled);buttons.forEach(b=>b.disabled=true);try{await fn();}catch(e){this.message(e.message||String(e),true);}finally{buttons.forEach((b,i)=>{if(!['apply','update'].includes(b.id))b.disabled=disabled[i];else if(b.id==='update')b.disabled=!this.latest;else if(!this.token)b.disabled=true;});this.busy=false;}}
+  selected(){return this.tasks?.find(t=>t.key===this.$('task').value);}
+  async scan(){const selected=this.$('task').value;this.tasks=await this.host.api.post('scan',{});this.$('task').replaceChildren(...this.tasks.map(t=>new Option(t.name,t.key)));if(this.tasks.some(t=>t.key===selected))this.$('task').value=selected;this.choose();this.message(`发现 ${this.tasks.length} 个已完成任务。`);}
+  choose(){const t=this.selected();this.$('mapping').hidden=!t;if(!t)return;const m=t.mapping||{};this.$('type').value=m.media_type||'tv';this.$('query').value=t.suggested_title;this.$('tmdb').value=m.tmdb_id||'';this.$('season').value=m.season??1;this.$('offset').value=m.episode_offset??0;this.$('episodes').replaceChildren(...t.files.filter(f=>/\.(mkv|mp4|avi|m4v|ts|webm|mov)$/i.test(f.name)).map(f=>{const label=document.createElement('label');label.textContent=f.name;const input=document.createElement('input');input.type='number';input.min='0';input.placeholder='自动识别';input.dataset.file=f.name;input.value=m.episodes?.[f.name]??'';label.append(input);return label;}));this.$('future').disabled=t.rule_id==null;this.$('future').checked=false;this.$('main').replaceChildren(new Option('自动（仅单一候选时）',''),...t.files.map(f=>new Option(f.name,f.name)));this.$('main').value=m.main_file||'';}
+  async status(){const s=await this.host.api.get('status');this.$('state').textContent=s.active?'已接管':'预览模式';this.$('automatic').checked=s.automatic;if(s.error)this.message(s.error,true);else if(s.results?.length){const c={};for(const r of s.results)c[r.state]=(c[r.state]||0)+1;this.message('上次整理：'+JSON.stringify(c)+'\n'+s.results.filter(r=>r.state==='held'||r.state==='failed').slice(0,30).map(r=>r.detail).join('\n'));}this.updateStatus(s.update);}
+  updateStatus(u){this.$('version').textContent=`v${u.current}${u.error?' · '+u.error:''}`;this.latest=u.version;this.$('update').hidden=!u.available;this.$('update').disabled=!u.available;this.$('update').textContent=`更新到 ${u.version}`;}
+}
+if(!customElements.get('ab-plugin-library-organizer'))customElements.define('ab-plugin-library-organizer',Organizer);

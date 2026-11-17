@@ -1,0 +1,230 @@
+"""All private AB 4.0 imports are isolated here; see docs/UPSTREAM_API.md."""
+
+import json
+import os
+import re
+import shutil
+import time
+from pathlib import Path
+from urllib.parse import urlencode
+
+from .planner import contained, fingerprint, task_key
+
+
+class Bridge40:
+    def __init__(self, options, store):
+        self.options, self.store = options, store
+        self.original = None
+
+    def setup(self):
+        from module.conf import VERSION
+        from module.manager.renamer import Renamer
+
+        if VERSION != "4.0.0":
+            raise ValueError("此适配层仅支持 AB 4.0.0")
+        self.original = Renamer.rename
+        bridge = self
+
+        async def guarded(renamer):
+            if bridge.store.get("active", False):
+                return []
+            return await bridge.original(renamer)
+
+        self.wrapper = guarded
+        Renamer.rename = guarded
+
+    def teardown(self):
+        from module.manager.renamer import Renamer
+
+        if self.original and Renamer.rename is self.wrapper:
+            Renamer.rename = self.original
+
+    def health(self):
+        from module.conf import settings
+
+        return {
+            "native_rename": settings.bangumi_manage.enable,
+            "native_hardlink": settings.plugins.enabled.get("hardlink", False),
+        }
+
+    async def activate(self, context):
+        from module.conf.config import CONFIG_PATH
+
+        # Stop existing rename workers before ownership changes; persisted native disable
+        # ensures unloading/crashing this plugin doesn't resume source renaming.
+        running = context.is_running
+        if running:
+            await context.stop()
+        try:
+            backup = self.store.backup()
+            shutil.copy2(CONFIG_PATH, backup / "config.json")
+            data = json.loads(CONFIG_PATH.read_text())
+            data.setdefault("bangumi_manage", {})["enable"] = False
+            data.setdefault("plugins", {}).setdefault("enabled", {})["hardlink"] = False
+            temp = CONFIG_PATH.with_name(CONFIG_PATH.name + ".organizer.tmp")
+            temp.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+            os.replace(temp, CONFIG_PATH)
+            self.store.set("active", True)
+            await context.reload_settings()
+            return {"active": True, "backup": str(backup)}
+        finally:
+            if running and not context.is_running:
+                await context.start_tasks()
+
+    def local_path(self, instance, path):
+        remote = Path(path)
+        maps = sorted(
+            (m for m in self.options.path_map if m.downloader == instance),
+            key=lambda m: len(m.remote),
+            reverse=True,
+        )
+        for m in maps:
+            try:
+                relative = remote.relative_to(Path(m.remote))
+            except ValueError:
+                continue
+            remote = Path(m.local) / relative
+            break
+        return (
+            remote.resolve()
+            if remote.resolve() == Path(self.options.source_root).resolve()
+            else contained(self.options.source_root, remote)
+        )
+
+    async def scan(self):
+        from module.database import Database
+        from module.downloader import DownloadClient
+        from module.downloader.download_client import downloader_ids
+        from module.models import Bangumi
+        from sqlmodel import select
+
+        async with Database() as db:
+            rules = (
+                (await db.session.execute(select(Bangumi).where(Bangumi.deleted.is_(False))))
+                .scalars()
+                .all()
+            )
+        tasks = []
+        for instance in downloader_ids():
+            async with DownloadClient(instance) as client:
+                infos = await client.get_torrent_info(
+                    category=None, status_filter="completed", tag=None
+                )
+                for info in infos:
+                    if float(info.get("progress", 0)) < 1:
+                        continue
+                    try:
+                        base = self.local_path(instance, info["save_path"])
+                    except ValueError:
+                        continue
+                    key = task_key(instance, str(info["hash"]))
+                    matches = []
+                    for rule in rules:
+                        if rule.downloader_id and rule.downloader_id != instance:
+                            continue
+                        # Do not use qB tags or folder labels as identity. Ambiguity is held.
+                        try:
+                            match = bool(
+                                rule.title_raw and re.search(rule.title_raw, info["name"], re.I)
+                            )
+                        except re.error:
+                            match = False
+                        if match:
+                            matches.append(rule)
+                    rid = matches[0].id if len(matches) == 1 else None
+                    files = []
+                    for f in await client.get_torrent_files(info["hash"]):
+                        try:
+                            src = contained(self.options.source_root, base / f["name"])
+                            fp = (
+                                fingerprint(src)
+                                if src.is_file() and src.stat().st_size == f["size"]
+                                else None
+                            )
+                        except ValueError, OSError:
+                            continue
+                        files.append(
+                            {
+                                "name": f["name"],
+                                "index": f["index"],
+                                "source": str(src),
+                                "size": f["size"],
+                                "progress": f.get("progress", 0),
+                                "fingerprint": fp,
+                            }
+                        )
+                    task = {
+                        "key": key,
+                        "instance": instance,
+                        "task_id": info["hash"],
+                        "name": info["name"],
+                        "rule_id": rid,
+                        "suggested_title": matches[0].official_title if rid else info["name"],
+                        "files": files,
+                    }
+                    tasks.append(task)
+                    self.store.save_task(task)
+        return tasks
+
+    async def tmdb(self, path, params=None):
+        from module.network import RequestContent
+        from module.parser.analyser.tmdb_parser import _api_key, _tmdb_url
+
+        params = {"api_key": _api_key(), "language": "zh-CN", **(params or {})}
+        url = _tmdb_url() + "/3/" + path + "?" + urlencode(params)
+        async with RequestContent() as req:
+            result = await req.get_json(url)
+        if not isinstance(result, dict) or result.get("success") is False:
+            raise ValueError("TMDB 请求失败，请稍后重试")
+        return result
+
+    async def search(self, query, kind):
+        if kind not in {"tv", "movie"}:
+            raise ValueError("媒体类型无效")
+        data = await self.tmdb("search/" + kind, {"query": query})
+        return [
+            {
+                "id": r["id"],
+                "title": r.get("name") or r.get("title"),
+                "year": (r.get("first_air_date") or r.get("release_date") or "")[:4],
+            }
+            for r in data.get("results", [])[:20]
+        ]
+
+    async def metadata(self, mapping):
+        key = f"tmdb:{mapping.media_type}:{mapping.tmdb_id}:{mapping.season}"
+        cached = self.store.get(key)
+        if cached and time.time() - cached["at"] < 3600:
+            return cached["data"]
+        data = await self.tmdb(f"{mapping.media_type}/{mapping.tmdb_id}")
+        episodes = []
+        if mapping.media_type == "tv":
+            season = await self.tmdb(f"tv/{mapping.tmdb_id}/season/{mapping.season}")
+            episodes = [e["episode_number"] for e in season.get("episodes", [])]
+            if not episodes:
+                raise ValueError("TMDB 中未找到该季集数")
+        result = {
+            "title": data.get("name") or data.get("title"),
+            "year": (data.get("first_air_date") or data.get("release_date") or "")[:4],
+            "episodes": episodes,
+        }
+        if not result["title"]:
+            raise ValueError("TMDB 条目没有标题")
+        self.store.set(key, {"at": time.time(), "data": result})
+        return result
+
+    async def refresh_jellyfin(self):
+        import httpx
+
+        if not self.options.jellyfin_url or not self.options.jellyfin_api_key:
+            return "未配置"
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                r = await client.post(
+                    self.options.jellyfin_url.rstrip("/") + "/Library/Refresh",
+                    headers={"X-Emby-Token": self.options.jellyfin_api_key},
+                )
+                r.raise_for_status()
+            return "已请求扫描（不代表识别验证完成）"
+        except Exception:
+            return "扫描请求失败；硬链已保留，可重试"
