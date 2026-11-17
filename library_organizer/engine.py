@@ -32,6 +32,14 @@ class Engine:
         return None
 
     def run_items(self, items, rule_id):
+        # Keep WAL open across per-file connections without holding a transaction.
+        # Otherwise closing the last connection checkpoints/recreates it each time.
+        # Every ownership intent still commits durably before filesystem publication.
+        with self.store.db() as reader:
+            reader.execute("SELECT key FROM kv LIMIT 1").fetchall()
+            return self._run_items(items, rule_id)
+
+    def _run_items(self, items, rule_id):
         self._progress = {
             "state": "running",
             "rule_id": rule_id,
@@ -49,7 +57,13 @@ class Engine:
                 result = self.link(item)
                 results.append(result)
                 counts = dict(self._progress["counts"])
-                kind = result.get("method") if result["state"] == "linked" else result["state"]
+                kind = (
+                    "reused"
+                    if result.get("action") == "relocated"
+                    else result.get("method")
+                    if result["state"] == "linked"
+                    else result["state"]
+                )
                 counts[kind] = counts.get(kind, 0) + 1
                 self._progress = {**self._progress, "completed": len(results), "counts": counts}
             self._progress = {
@@ -168,6 +182,7 @@ class Engine:
                 raise ValueError("源文件已变化，请重新预览")
             ownership = self.ownership(item, dst)
             method = ownership["method"] if ownership else None
+            action = "unchanged" if dst.exists() else "created"
             if dst.exists():
                 if not self.valid_owned(item, dst, ownership):
                     if fingerprint(dst) != item["fingerprint"]:
@@ -181,7 +196,6 @@ class Engine:
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst = contained(self.options.library_root, dst)
-                self.store.record(item, "linking")
                 # A naming/mapping edit can reuse our verified existing replica
                 # on the library filesystem, instead of copying the video again.
                 for old in item.get("old_targets", []):
@@ -191,6 +205,7 @@ class Engine:
                         method = prior["method"]
                         self.store.claim(item, fingerprint(old_path), method)
                         os.link(old_path, dst, follow_symlinks=False)
+                        action = "relocated"
                         break
                 else:
                     method = publish(
@@ -202,6 +217,7 @@ class Engine:
                 if not self.valid_owned(item, dst, self.ownership(item, dst)):
                     raise ValueError("目标文件校验失败")
             detail = ""
+            obsolete = []
             # Only remove links explicitly owned by this plugin, after new link verified.
             for old in item.get("old_targets", []):
                 ownership = next(
@@ -215,11 +231,19 @@ class Engine:
                         detail = "旧路径已改变，已保留"
                         continue
                     old_path.unlink()
-                self.store.forget(old)
+                obsolete.append(old)
             label = {"hardlink": "硬链", "reflink": "Reflink", "copy": "普通复制"}[method]
+            if action == "relocated":
+                label = "复用原副本（" + label + "）"
             detail = label + ("；" + detail if detail else "")
-            self.store.record(item, "linked", detail)
-            return {"key": item["key"], "state": "linked", "method": method, "detail": detail}
+            self.store.record(item, "linked", detail, obsolete=obsolete)
+            return {
+                "key": item["key"],
+                "state": "linked",
+                "method": method,
+                "action": action,
+                "detail": detail,
+            }
         except (OSError, ValueError) as e:
             # Preserve any existing ownership record; failed plans can be retried safely.
             return {"key": item["key"], "state": "failed", "detail": str(e)}

@@ -219,7 +219,9 @@ async def test_fallback_idempotence_restart_and_mapping_change(env, monkeypatch,
     assert fingerprint(old) == original_fp
     e.store.bind(t["key"], {"tmdb_id": 1, "season": 2})
     p = await e.preview()
-    await e.apply(p["token"])
+    r = await e.apply(p["token"])
+    assert r["results"][0]["action"] == "relocated"
+    assert e.progress()["counts"] == {"reused": 1}
     assert not old.exists()
     assert fingerprint(Path(p["items"][0]["target"])) == original_fp
     assert Path(p["items"][0]["target"]).read_bytes() == s.read_bytes()
@@ -310,10 +312,10 @@ async def test_restart_recovers_published_copy_intent(env, monkeypatch):
     p = await e.preview()
     real_record = e.store.record
 
-    def fail_after_publish(item, state, detail=""):
+    def fail_after_publish(item, state, detail="", **kwargs):
         if state == "linked":
             raise RuntimeError("simulate process death")
-        real_record(item, state, detail)
+        real_record(item, state, detail, **kwargs)
 
     monkeypatch.setattr(e.store, "record", fail_after_publish)
     with pytest.raises(RuntimeError):
@@ -405,3 +407,29 @@ async def test_future_download_automatically_inherits_rule_mapping(env):
     assert any(
         row["key"].startswith(new["key"]) and row["state"] == "linked" for row in e.store.files()
     )
+
+
+async def test_relocated_copy_recovers_after_final_bookkeeping_crash(env, monkeypatch):
+    e, task, source = env
+    cross_device(monkeypatch, source, "copy")
+    plan = await e.preview()
+    await e.apply(plan["token"])
+    old = Path(plan["items"][0]["target"])
+    original_fp = fingerprint(old)
+    e.store.bind(task["key"], {"tmdb_id": 1, "season": 2})
+    plan = await e.preview()
+
+    def crash(*args, **kwargs):
+        raise RuntimeError("process stopped after old path removal")
+
+    monkeypatch.setattr(e.store, "record", crash)
+    with pytest.raises(RuntimeError):
+        await e.apply(plan["token"])
+    assert not old.exists()
+    assert len(e.store.owned()) == 2
+    e = Engine(Store(e.store.path), e.bridge, e.options)
+    plan = await e.preview()
+    assert plan["held"] == 0
+    await e.apply(plan["token"])
+    assert len(e.store.owned()) == 1
+    assert fingerprint(Path(plan["items"][0]["target"])) == original_fp

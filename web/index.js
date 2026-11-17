@@ -2,7 +2,7 @@ const css=`:host{display:block;font:14px/1.5 var(--ab-font-family,system-ui);col
 const progressMarkup = `<section id="progress-panel" hidden aria-live="polite"><p id="progress-label"></p><progress aria-label="文件整理进度" id="progress-bar" max="1" value="0" style="width:100%;accent-color:var(--ab-color-primary,#5274d9)"></progress><p id="progress-current" class="muted" style="overflow-wrap:anywhere"></p><small id="progress-counts"></small></section>`;
 const stateNames = {linked:'已整理',exists:'已有链接',held:'待确认',failed:'失败'};
 function summary(rows) {
-  const counts={}; for(const r of rows){const key=r.state==='linked'&&r.method?({hardlink:'硬链',reflink:'Reflink',copy:'普通复制'}[r.method]||r.state):r.state;counts[key]=(counts[key]||0)+1;}
+  const counts={}; for(const r of rows){const key=r.action==='relocated'?'复用副本':r.state==='linked'&&r.method?({hardlink:'硬链',reflink:'Reflink',copy:'普通复制'}[r.method]||r.state):r.state;counts[key]=(counts[key]||0)+1;}
   return Object.entries(counts).map(([key,n])=>`${stateNames[key]||key} ${n}`).join(' · ');
 }
 class Panel extends HTMLElement {
@@ -32,7 +32,7 @@ class Panel extends HTMLElement {
     this.$('progress-bar').max=p.total||1;this.$('progress-bar').value=p.completed;
     this.$('progress-bar').hidden=p.state==='interrupted';
     this.$('progress-current').textContent=p.current?'当前：'+p.current:'';
-    const names={hardlink:'硬链',reflink:'Reflink',copy:'普通复制',exists:'已存在',held:'待确认',failed:'失败'};
+    const names={reused:'复用副本',hardlink:'硬链',reflink:'Reflink',copy:'普通复制',exists:'已存在',held:'待确认',failed:'失败'};
     this.$('progress-counts').textContent=Object.entries(p.counts).map(([k,n])=>`${names[k]||k} ${n}`).join(' · ');
   }
   message(text,error=false) {this.$('message').textContent=text;this.$('message').className=error?'error':'';}

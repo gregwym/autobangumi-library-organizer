@@ -68,8 +68,11 @@ class Store:
                     return value
         return None
 
-    def record(self, item, state, detail=""):
+    def record(self, item, state, detail="", obsolete=()):
         with self.db() as c:
+            for target in obsolete:
+                c.execute("DELETE FROM owned WHERE target=?", (target,))
+                c.execute("DELETE FROM transfers WHERE target=?", (target,))
             c.execute(
                 "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?)",
                 (
