@@ -345,3 +345,59 @@ async def test_new_ignore_marker_without_media_server_calls(scoped):
     await x.engine.apply(p["token"], rule_id=x.a.id)
     x.bridge.refresh_jellyfin.assert_not_awaited()
     assert (archive / ".ignore").read_bytes() == b""
+
+
+def test_resources_scope_excludes_video_subtitles_and_external_audio(tmp_path):
+    task, opts = fixture(
+        tmp_path,
+        [
+            "Show [01].mkv",
+            "Show [01].chs.ass",
+            "Show [01].ja.flac",
+            "Unmatched.ass",
+            "Unidentified.dts",
+            "CDs/Album/01.flac",
+            "CDs/Album/cover.jpg",
+            "Fonts/Fonts.7z",
+        ],
+    )
+    opts.music_root = str(tmp_path / "music")
+    rows = plan(task, opts, scope="resources")
+    assert {i["name"] for i in rows} == {
+        "CDs/Album/01.flac",
+        "CDs/Album/cover.jpg",
+        "Fonts/Fonts.7z",
+    }
+
+
+async def test_resources_binding_preserves_video_and_handles_incremental_music(scoped, tmp_path):
+    from module.database import Database
+    from module.models import Bangumi
+
+    x = scoped
+    await x.engine.tick()
+    original = {r["target"]: fingerprint(Path(r["target"])) for r in x.store.owned()}
+    # Native season is now wrong for this already organized collection.
+    async with Database() as db:
+        rule = await db.session.get(Bangumi, x.a.id)
+        rule.season = 1
+        await db.commit()
+    key = next(t["key"] for t in x.store.tasks() if t["rule_id"] == x.a.id)
+    x.store.bind(key, {"tmdb_id": 9, "season": 1})  # old task override must not widen scope
+    x.store.bind("rule:" + str(x.a.id), {"tmdb_id": 9, "scope": "resources"})
+    music = tmp_path / "music"
+    music.mkdir()
+    x.engine.options.music_root = str(music)
+    for n in (1, 2):
+        name = f"CDs/Album/{n:02d}.flac"
+        path = x.root / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"abc")
+        x.files["a" * 40].append({"index": n, "name": name, "size": 3, "progress": 1})
+        preview = await x.engine.preview(rule_id=x.a.id)
+        assert all(i["kind"] == "music" for i in preview["items"])
+        await x.engine.tick()
+        assert len(list(music.rglob("*.flac"))) == n
+        assert all(fingerprint(Path(p)) == fp for p, fp in original.items())
+        assert not list(Path(x.engine.options.library_root).rglob("*S01*"))
+    assert len(x.store.owned()) == len(original) + 2

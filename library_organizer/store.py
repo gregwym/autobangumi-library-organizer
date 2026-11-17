@@ -117,12 +117,17 @@ class Store:
         if task.get("rule_id") is not None:
             keys.append("rule:" + str(task["rule_id"]))
         with self.db() as c:
+            rule = c.execute("SELECT payload FROM bindings WHERE key=?", (keys[-1],)).fetchone()
+            resources_only = bool(rule and json.loads(rule[0]).get("scope") == "resources")
             for key in keys:
                 r = c.execute("SELECT payload FROM bindings WHERE key=?", (key,)).fetchone()
                 if r:
                     value = json.loads(r[0])
                     if key.startswith("rule:") and value.get("follow_ab", True):
                         value.update(task.get("rule_mapping", {}))
+                    # An old per-task override cannot widen the entry processing scope.
+                    if resources_only:
+                        value["scope"] = "resources"
                     return value
         return None
 

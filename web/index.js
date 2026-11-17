@@ -99,10 +99,11 @@ class Detail extends Panel {
   connectedCallback() {
     this.rid=Number(this.context?.bangumiId);
     this.mount(`<p id="state" class="muted"></p>
-      <p>本番的设置对后续下载持续生效。保存映射不会立即移动或修改文件；可先预览确认。</p>
+      <p>本番的设置对后续下载持续生效。自动整理开启时，保存后会在下次扫描生效。</p>
       <div class="row"><label>类型<select id="type"><option value="tv">剧集</option><option value="movie">电影</option></select></label><label>搜索名称<input id="query"></label><button id="search">搜索 TMDB</button></div>
       <label>TMDB 条目<select id="matches"><option value="">请搜索或填写 TMDB ID</option></select></label>
       <label>TMDB ID<input id="tmdb" type="number" min="1"></label><p id="ab-mapping" class="muted"></p>
+      <label>整理范围<select id="scope"><option value="all">全部资源</option><option value="resources">仅音乐与归档附件</option></select></label><p class="muted">仅音乐与归档附件：保留已有视频、字幕和外挂音轨的位置；后续自动整理也遵循此范围。</p>
       <div class="row"><button id="save" class="primary">保存本番设置</button><button id="scan">刷新下载任务</button></div>
       <p id="task-count" class="muted">点击“刷新下载任务”查看已有资源；设置可在下载完成前保存。</p>
       <details id="task-panel"><summary>下载任务与逐文件设置</summary><div class="body">
@@ -121,7 +122,7 @@ class Detail extends Panel {
       </div></details>
       <div class="row"><button id="preview">预览本番整理计划</button><button id="apply" class="primary" disabled>执行此计划</button></div>
       <div id="plan" class="plan"></div><details id="result-panel" hidden><summary>上次整理明细</summary><div id="results" class="table-scroll"></div><div class="row"><button id="result-prev">上一页</button><span id="result-page"></span><button id="result-next">下一页</button></div></details>${progressMarkup}<div id="message" role="status"></div>`);
-    for(const id of ['type','query','tmdb'])this.$(id).oninput=()=>{this.dirty=true;this.invalidate();};
+    for(const id of ['type','query','tmdb','scope'])this.$(id).oninput=()=>{this.dirty=true;this.invalidate();};
     this.action('search',async()=>{
       const rows=await this.host.api.get(`search?query=${encodeURIComponent(this.$('query').value)}&kind=${this.$('type').value}`);
       this.$('matches').replaceChildren(new Option('请选择',''),...rows.map(r=>new Option(`${r.title} (${r.year}) [${r.id}]`,r.id)));
@@ -171,13 +172,13 @@ class Detail extends Panel {
     this.run(async()=>{if(!Number.isInteger(this.rid)||this.rid<1)throw new Error('无法确定当前番剧');await this.loadRule();});this.watchProgress(this.rid);
   }
   fileMapping(special) {return Object.fromEntries([...this.$('episodes').querySelectorAll('input')].filter(i=>i.value!==''&&(i.parentElement.querySelector('select').value==='special')===special).map(i=>[i.dataset.file,Number(i.value)]));}
-  mappingForm() {return {media_type:this.$('type').value,tmdb_id:Number(this.$('tmdb').value),season:this.abRule?.season??1,episode_offset:this.abRule?.episode_offset??0,episodes:{},main_file:null};}
+  mappingForm() {return {scope:this.$('scope').value,media_type:this.$('type').value,tmdb_id:Number(this.$('tmdb').value),season:this.abRule?.season??1,episode_offset:this.abRule?.episode_offset??0,episodes:{},main_file:null};}
   invalidate() {this.token=null;if(this.$('apply'))this.$('apply').disabled=true;}
   async loadRule() {
     const data=await this.host.api.get(`rules/${this.rid}/library`);this.mapping=data.mapping;
     this.renderResults(data.results||[]);
     const m=data.mapping||data.rule;
-    this.$('type').value=m.media_type||'tv';this.$('query').value=data.rule.title;
+    this.$('scope').value=m.scope||'all';this.$('type').value=m.media_type||'tv';this.$('query').value=data.rule.title;
     this.$('tmdb').value=m.tmdb_id||'';this.abRule=data.rule;this.$('ab-mapping').textContent=`季集跟随 AB「规则」：第 ${data.rule.season} 季，集数偏移 ${data.rule.episode_offset}。修改原有规则后，下次整理自动使用新值。`;
     this.$('state').textContent=!data.active?'预览模式 · 请到全局设置接管整理':data.automatic?'自动整理已开启 · 下载完成后会使用本番映射':'自动整理已关闭 · 可以手动整理本番';
   }

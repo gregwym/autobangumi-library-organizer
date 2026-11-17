@@ -452,6 +452,10 @@ def build(task, mapping, metadata, options):
             item["target"] = str(album / clean(path.name))
             item.pop("archive_root", None)
             item["notice"] = "随专辑整理的封面或歌词；其他扫描图保持归档"
+    # Classify against the full task first: external audio must not become music.
+    # Omitted video/sidecar rows keep their existing ownership and history untouched.
+    if mapping.scope == "resources":
+        entries = [i for i in entries if i["kind"] in {"music", "resource"}]
     targets = {}
     for item in entries:
         if item["target"]:

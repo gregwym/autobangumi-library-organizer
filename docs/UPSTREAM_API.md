@@ -119,3 +119,7 @@ AB 内置 media-server-refresh 使用旧 `X-Emby-Token`。Jellyfin 12 默认禁�
 整理器仅输出音乐文件和自有 `collection.xml` 清单，不依赖 Jellyfin URL、API Key、item ID 或媒体路径翻译。音乐容器路径需一致；媒体服务器的库创建、扫描、验证由管理员或独立集成处理。上游文件提交事件可通知已有刷新插件，刷新插件持有权限，不应倒置到整理器。Music 与 collections 输出根目录独立；增量合集聚合只纳入已成功发布且所有权验证通过的专辑，跨 entry 可聚合到同一作品，但每次文件整理仍保持 entry 隔离。
 
 目标 Jellyfin 12.4 的实机约束：`LockData=true` 会阻止后续本地元数据导入，所以生成清单使用 false。独立的生成合集库须将 `MetadataSavers=[]`，避免服务器回写清单。当前 BoxSet 元数据合并对外部清单成员取并集；清单新增成员可导入，但仅从 XML 删除成员不保证从 Jellyfin 数据库移除。插件不为绕过此限制请求媒体服务器 API；如用户要清空或重建合集，交由 Jellyfin 管理。
+
+独立音乐合集入口应使用 Mixed 内容类型，以保留父目录范围。Boxsets 类型在 Jellyfin Web 打开全局合集视图，会把电影合集也展示在音乐入口；清单本身只关联音乐目录。
+
+0.7.1 新增 entry 级 `scope=all|resources`，资源范围限制优先于任务覆盖，保存于插件独立绑定中，不修改 AB 原生季度或下载路径。上游详情扩展 API 应允许这一类插件特定的逐番策略，并在自动扫描时读取同一有效配置。

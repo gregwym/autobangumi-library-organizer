@@ -109,6 +109,7 @@ class Options(BaseModel):
 
 
 class Mapping(BaseModel):
+    scope: Literal["all", "resources"] = "all"
     media_type: Literal["tv", "movie"] = "tv"
     tmdb_id: int = Field(gt=0)
     season: int = Field(default=1, ge=0, le=999)
