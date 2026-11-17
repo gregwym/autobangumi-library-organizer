@@ -8,7 +8,8 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from .association import Associations
-from .planner import contained, fingerprint, task_key
+from .planner import VIDEO, contained, destination, fingerprint, task_key
+from .resources import MUSIC
 
 
 class Bridge40:
@@ -124,12 +125,14 @@ class Bridge40:
         assignments, bindings = await asyncio.to_thread(self.store.scan_state)
         tasks = []
         saved = []
+        seen = set()
         for instance in downloader_ids():
             async with DownloadClient(instance) as client:
                 infos = await client.get_torrent_info(
                     category=None, status_filter="completed", tag=None
                 )
                 for info in infos:
+                    seen.add(task_key(instance, str(info["hash"])))
                     if float(info.get("progress", 0)) < 1:
                         continue
                     try:
@@ -195,7 +198,91 @@ class Bridge40:
                     if inspect_files:
                         saved.append(task)
         await asyncio.to_thread(self.store.save_tasks, saved)
+        if self.options.music_root:
+            tasks.extend(
+                await asyncio.to_thread(
+                    self.archived_music,
+                    seen,
+                    associations,
+                    assignments,
+                    bindings,
+                    rule_id,
+                )
+            )
         return tasks
+
+    def archived_music(self, seen, associations, assignments, bindings, rule_id):
+        """Replay known archived music only, even after its qB task/source was removed."""
+        owned = {}
+        for row in self.store.owned():
+            owned.setdefault(row["key"], []).append(row)
+        recovered = []
+        for cached in self.store.tasks():
+            key = cached["key"]
+            if key in seen:
+                continue
+            rid, evidence = associations.resolve(
+                cached.get("instance", "default"), cached.get("task_id", ""), assignments.get(key)
+            )
+            if rid is None or rule_id is not None and rid != rule_id:
+                continue
+            # Archived content must remain bound; do not revive old, unbound entries.
+            if key not in bindings and f"rule:{rid}" not in bindings:
+                continue
+            rule = associations.rules.get(rid)
+            files = []
+            for source in cached.get("files", []):
+                path = Path(source["name"])
+                if path.suffix.lower() not in MUSIC | {".cue", ".lrc", ".elrc"} and not (
+                    path.stem.lower() in {"cover", "folder"}
+                    and path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}
+                ):
+                    continue
+                for row in owned.get(key + ":" + str(source["index"]), []):
+                    try:
+                        replica = destination(self.options, row["target"])
+                        # Only already archived/music paths; never use a linked TV audio sidecar.
+                        if (
+                            "_resources" not in replica.parts
+                            and Path(self.options.music_root).resolve() not in replica.parents
+                        ):
+                            continue
+                        if json.loads(row["source_fingerprint"]) != source.get(
+                            "fingerprint"
+                        ) or fingerprint(replica) != json.loads(row["fingerprint"]):
+                            continue
+                        files.append(
+                            {
+                                **source,
+                                "progress": 1,
+                                "replay_source": str(replica),
+                                "replay_fingerprint": fingerprint(replica),
+                            }
+                        )
+                        break
+                    except OSError, ValueError:
+                        continue
+            if any(Path(f["name"]).suffix.lower() in MUSIC for f in files):
+                recovered.append(
+                    {
+                        **cached,
+                        "files": files,
+                        "reference_videos": [
+                            f["name"]
+                            for f in cached.get("files", [])
+                            if Path(f["name"]).suffix.lower() in VIDEO
+                        ],
+                        "rule_id": rid,
+                        "association": evidence,
+                        "rule_mapping": {
+                            "season": max(0, rule.season + rule.season_offset),
+                            "episode_offset": rule.episode_offset,
+                        }
+                        if rule
+                        else {},
+                    }
+                )
+        return recovered
 
     async def tmdb(self, path, params=None):
         from module.network import RequestContent
@@ -223,21 +310,26 @@ class Bridge40:
         ]
 
     async def metadata(self, mapping):
-        key = f"tmdb:{mapping.media_type}:{mapping.tmdb_id}:{mapping.season}"
+        key = f"tmdb:{mapping.media_type}:{mapping.tmdb_id}:{mapping.season}:specials={bool(mapping.specials)}"
         cached = self.store.get(key)
         if cached and time.time() - cached["at"] < 3600:
             return cached["data"]
         data = await self.tmdb(f"{mapping.media_type}/{mapping.tmdb_id}")
         episodes = []
+        specials = []
         if mapping.media_type == "tv":
             season = await self.tmdb(f"tv/{mapping.tmdb_id}/season/{mapping.season}")
             episodes = [e["episode_number"] for e in season.get("episodes", [])]
             if not episodes:
                 raise ValueError("TMDB 中未找到该季集数")
+            if mapping.specials:
+                season_zero = await self.tmdb(f"tv/{mapping.tmdb_id}/season/0")
+                specials = [e["episode_number"] for e in season_zero.get("episodes", [])]
         result = {
             "title": data.get("name") or data.get("title"),
             "year": (data.get("first_air_date") or data.get("release_date") or "")[:4],
             "episodes": episodes,
+            "specials": specials,
         }
         if not result["title"]:
             raise ValueError("TMDB 条目没有标题")

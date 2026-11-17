@@ -15,6 +15,11 @@ class PathMap(BaseModel):
 class Options(BaseModel):
     source_root: str = Field(default="/downloads", title="下载根目录（AB 内路径）")
     library_root: str = Field(default="/library", title="媒体库根目录（AB 内路径）")
+    music_root: str = Field(
+        default="",
+        title="音乐库根目录（可选，AB 内路径）",
+        description="留空时音乐按原目录归档；填写后自动补整理已归档音乐。须为已存在、AB 可写且 Jellyfin 可见的独立音乐库目录；不自动创建 Jellyfin 媒体库。",
+    )
     tv_subdirectory: str = Field(
         default="Shows",
         title="剧集分类子目录",
@@ -79,6 +84,15 @@ class Options(BaseModel):
         a, b = a.resolve(), b.resolve()
         if a == b or a in b.parents or b in a.parents:
             raise ValueError("下载与媒体库目录不能重叠")
+        if self.music_root:
+            music = Path(self.music_root)
+            if not music.is_absolute():
+                raise ValueError("音乐库路径必须是绝对路径")
+            music = music.resolve()
+            if any(
+                music == root or music in root.parents or root in music.parents for root in (a, b)
+            ):
+                raise ValueError("音乐库必须与下载和视频库目录分开，不能重叠")
         for m in self.path_map:
             if not Path(m.remote).is_absolute() or not Path(m.local).is_absolute():
                 raise ValueError("路径映射必须使用绝对路径")
@@ -92,7 +106,18 @@ class Mapping(BaseModel):
     episode_offset: int = Field(default=0, ge=-100000, le=100000)
     # Overrides use the exact source relative name, never just the inferred episode.
     episodes: dict[str, int] = Field(default_factory=dict)
+    specials: dict[str, int] = Field(default_factory=dict)
     main_file: str | None = None
+
+    @model_validator(mode="after")
+    def episode_maps(self):
+        if self.episodes.keys() & self.specials.keys():
+            raise ValueError("同一文件不能同时指定正片和特别篇集号")
+        if any(n < 0 or n > 100000 for n in (*self.episodes.values(), *self.specials.values())):
+            raise ValueError("集号必须在 0 到 100000 之间")
+        if self.specials and self.media_type != "tv":
+            raise ValueError("电影不能使用 Season 00 特别篇映射")
+        return self
 
 
 class Binding(BaseModel):

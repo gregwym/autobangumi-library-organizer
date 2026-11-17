@@ -142,7 +142,8 @@ def test_paths_cannot_escape(tmp_path):
 def test_unknown_subtitle_not_guessed(tmp_path):
     task, opts = fixture(tmp_path, ["Show - 01.mkv", "a.ass"])
     plan = build(task, Mapping(tmdb_id=1), {"title": "Show", "episodes": [1]}, opts)
-    assert plan[1]["target"] is None
+    assert "/_resources/" in plan[1]["target"]
+    assert "无法唯一对应" in plan[1]["notice"]
 
 
 @pytest.mark.parametrize("name", ["Show S01E01-E02.mkv", "Show S01E01-02.mkv", "Show [01-12].mkv"])

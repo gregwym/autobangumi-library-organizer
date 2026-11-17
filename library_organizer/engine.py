@@ -1,12 +1,14 @@
 import asyncio
+import errno
 import hashlib
 import json
 import os
 import secrets
 import time
+from pathlib import Path
 
 from .models import Mapping
-from .planner import build, contained, fingerprint
+from .planner import build, contained, destination, fingerprint
 from .transfer import publish
 
 
@@ -84,7 +86,7 @@ class Engine:
 
     def settings_digest(self):
         return digest(
-            {"layout": 2, "options": self.options.model_dump(exclude={"jellyfin_api_key"})}
+            {"layout": 3, "options": self.options.model_dump(exclude={"jellyfin_api_key"})}
         )
 
     def ownership(self, item, target):
@@ -110,7 +112,7 @@ class Engine:
                 if raw:
                     mapping = Mapping.model_validate(raw)
                     metadata = await self.bridge.metadata(mapping)
-                    entries = build(task, mapping, metadata, self.options)
+                    entries = await asyncio.to_thread(build, task, mapping, metadata, self.options)
                 else:
                     entries = [
                         {
@@ -144,7 +146,13 @@ class Engine:
                 ]
                 if i["target"]:
                     try:
-                        target = contained(self.options.library_root, i["target"])
+                        target = destination(self.options, i["target"])
+                        if (
+                            self.options.music_root
+                            and Path(self.options.music_root).resolve() in target.parents
+                            and not Path(self.options.music_root).is_dir()
+                        ):
+                            raise ValueError("音乐库根目录不存在或尚未挂载，已保留原归档")
                         if (
                             target.exists()
                             and fingerprint(target) != i["fingerprint"]
@@ -155,6 +163,11 @@ class Engine:
                     except ValueError as e:
                         i["reason"] = str(e)
                         i["target"] = None
+            blocked = {i["key"] for i in items if not i["target"]}
+            for i in items:
+                if i.get("video_key") in blocked:
+                    i["target"] = None
+                    i["reason"] = "对应视频有冲突，暂不挂载字幕或音轨"
             payload = {
                 "items": items,
                 "rule_id": rule_id,
@@ -178,9 +191,21 @@ class Engine:
             return {"key": item["key"], "state": "held", "detail": item["reason"]}
         try:
             src = contained(self.options.source_root, item["source"])
-            dst = contained(self.options.library_root, item["target"])
-            if fingerprint(src) != item["fingerprint"]:
+            expected = item["fingerprint"]
+            if item.get("replay_source"):
+                src = destination(self.options, item["replay_source"])
+                expected = item["replay_fingerprint"]
+                if not self.valid_owned(item, src, self.ownership(item, src)):
+                    raise ValueError("归档副本所有权或内容已变化，请重新预览")
+            dst = destination(self.options, item["target"])
+            if fingerprint(src) != expected:
                 raise ValueError("源文件已变化，请重新预览")
+            archive_changed = (
+                self.ensure_archive(item["archive_root"]) if item.get("archive_root") else False
+            )
+            if self.options.music_root and Path(self.options.music_root).resolve() in dst.parents:
+                if not Path(self.options.music_root).is_dir():
+                    raise ValueError("音乐库根目录不存在或尚未挂载，已保留原归档")
             ownership = self.ownership(item, dst)
             method = ownership["method"] if ownership else None
             action = "unchanged" if dst.exists() else "created"
@@ -192,27 +217,41 @@ class Engine:
                         "key": item["key"],
                         "state": "exists",
                         "method": "hardlink",
+                        "changed": archive_changed,
                         "detail": "已有同源硬链，未接管其所有权",
                     }
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
-                dst = contained(self.options.library_root, dst)
+                dst = destination(self.options, dst)
                 # A naming/mapping edit can reuse our verified existing replica
                 # on the library filesystem, instead of copying the video again.
                 for old in item.get("old_targets", []):
-                    old_path = contained(self.options.library_root, old)
+                    try:
+                        old_path = destination(self.options, old)
+                    except ValueError:
+                        continue
                     prior = self.ownership(item, old_path)
                     if old_path.exists() and self.valid_owned(item, old_path, prior):
                         method = prior["method"]
-                        self.store.claim(item, fingerprint(old_path), method)
-                        os.link(old_path, dst, follow_symlinks=False)
+                        try:
+                            self.store.claim(item, fingerprint(old_path), method)
+                            os.link(old_path, dst, follow_symlinks=False)
+                        except OSError as error:
+                            if error.errno not in {errno.EXDEV, errno.EOPNOTSUPP, errno.ENOSYS}:
+                                raise
+                            method = publish(
+                                old_path,
+                                dst,
+                                fingerprint(old_path),
+                                lambda fp, mode: self.store.claim(item, fp, mode),
+                            )
                         action = "relocated"
                         break
                 else:
                     method = publish(
                         src,
                         dst,
-                        item["fingerprint"],
+                        expected,
                         lambda fp, mode: self.store.claim(item, fp, mode),
                     )
                 if not self.valid_owned(item, dst, self.ownership(item, dst)):
@@ -226,7 +265,11 @@ class Engine:
                 )
                 if not ownership:
                     continue
-                old_path = contained(self.options.library_root, old)
+                try:
+                    old_path = destination(self.options, old)
+                except ValueError:
+                    detail = "旧目录已不在配置范围，已保留"
+                    continue
                 if old_path.exists():
                     if fingerprint(old_path) != json.loads(ownership["fingerprint"]):
                         detail = "旧路径已改变，已保留"
@@ -236,19 +279,35 @@ class Engine:
             label = {"hardlink": "硬链", "reflink": "Reflink", "copy": "普通复制"}[method]
             if action == "relocated":
                 label = "复用原副本（" + label + "）"
-            detail = label + ("；" + detail if detail else "")
+            detail = "；".join(filter(None, (label, detail, item.get("notice"))))
             self.store.record(item, "linked", detail, obsolete=obsolete)
             return {
                 "key": item["key"],
                 "state": "exists" if action == "unchanged" and not obsolete else "linked",
                 "method": method,
                 "action": action,
-                "changed": action != "unchanged" or bool(obsolete),
+                "changed": action != "unchanged" or bool(obsolete) or archive_changed,
                 "detail": detail,
             }
         except (OSError, ValueError) as e:
             # Preserve any existing ownership record; failed plans can be retried safely.
             return {"key": item["key"], "state": "failed", "detail": str(e)}
+
+    def ensure_archive(self, root):
+        root = contained(self.options.library_root, root)
+        if root.name != "_resources":
+            raise ValueError("归档目录无效")
+        root.mkdir(parents=True, exist_ok=True)
+        marker = contained(self.options.library_root, root / ".ignore")
+        try:
+            with marker.open("xb") as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+        except FileExistsError:
+            if not marker.is_file() or marker.stat().st_size:
+                raise ValueError("归档目录已有非空 .ignore，未覆盖；请确认排除规则")
+            return False
+        return True
 
     async def apply(self, token, rule_id=None):
         async with self.replay_lock, self.lock:
@@ -285,17 +344,21 @@ class Engine:
             for item, result in zip(plan["items"], results, strict=True):
                 result.update(name=item["name"], source=item["source"], target=item["target"])
             self.store.set("last_results", results)
-            retained = [
-                i
-                for i in self.store.get("last_items", [])
-                if rule_id is not None and i.get("rule_id") != rule_id
-            ]
+            processed = {i["key"] for i in plan["items"]}
+            retained = [i for i in self.store.get("last_items", []) if i["key"] not in processed]
             self.store.set("last_items", retained + plan["items"])
             for rid in {t.get("rule_id") for t in tasks}:
                 if rid is None:
                     continue
                 keys = {i["key"] for i in plan["items"] if i.get("rule_id") == rid}
-                self.store.set(f"last_results:rule:{rid}", [r for r in results if r["key"] in keys])
+                previous = [
+                    r
+                    for r in self.store.get(f"last_results:rule:{rid}", [])
+                    if r["key"] not in keys
+                ]
+                self.store.set(
+                    f"last_results:rule:{rid}", previous + [r for r in results if r["key"] in keys]
+                )
             refresh = (
                 await self.bridge.refresh_jellyfin()
                 if any(r.get("changed") for r in results)

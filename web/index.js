@@ -54,8 +54,8 @@ class Panel extends HTMLElement {
 class Settings extends Panel {
   connectedCallback() {
     this.mount(`<details open><summary>媒体库整理 · 全局设置</summary><div class="body">
-      <p>下载根目录、媒体库根目录、版本后缀和 Jellyfin 连接在插件配置中统一设置。优先硬链，不支持时依次尝试 Reflink、普通复制（占用额外空间）。</p>
-      <p class="muted">每部番的 TMDB 绑定、季集映射和整理预览，请到「番剧详情 → 媒体库」。</p>
+      <p>下载根目录、视频库、可选音乐库、版本后缀和 Jellyfin 连接在插件配置中统一设置。优先硬链，不支持时依次尝试 Reflink、普通复制（占用额外空间）。</p>
+      <p class="muted">音乐库留空时先归档；配置后自动补整理已归档音乐。音乐目录须对应 Jellyfin 中单独的音乐库。字体、扫描图和其他附件保留原目录归档。</p><p class="muted">每部番的 TMDB 绑定、季集映射和整理预览，请到「番剧详情 → 媒体库」。</p>
       <div class="row"><span id="state" class="badge"></span><button id="activate">接管整理</button></div>
       <label><input id="automatic" type="checkbox">自动整理已绑定的番剧</label>
       <small>开启后每分钟检查完成的下载，包括已绑定但尚未整理的旧下载。关闭后仍可在番剧详情手动预览、整理。</small>
@@ -109,7 +109,7 @@ class Detail extends Panel {
         <label>本番下载任务<select id="task"></select></label><p id="association" class="muted"></p><p id="inherit-state" class="muted"></p>
         <div id="override-fields">
           <div class="row"><label>此任务的季<input id="task-season" type="number" min="0"></label><label>此任务集数偏移<input id="task-offset" type="number"></label></div>
-          <p class="muted">逐文件填写集号可覆盖自动识别；留空则自动识别。这里的设置只影响当前下载任务。</p>
+          <p class="muted">逐文件填写集号可覆盖自动识别；特别篇选择 Season 00 并填写 TMDB 特别篇集号。留空时特典按附加视频整理，不猜编号。这里的设置只影响当前下载任务。</p>
           <div id="episodes" class="plan"></div>
           <label>电影正片<select id="main"></select></label>
           <div class="row"><button id="save-task">保存此任务独立设置</button><button id="inherit">恢复跟随本番设置</button></div>
@@ -137,7 +137,7 @@ class Detail extends Panel {
       const task=this.selected();const base=task?.override||this.mapping;
       if(!task||!base)throw new Error('请先保存本番 TMDB 设置，再配置具体任务。');
       const mapping={...base,season:Number(this.$('task-season').value),episode_offset:Number(this.$('task-offset').value),
-        episodes:Object.fromEntries([...this.$('episodes').querySelectorAll('input')].filter(i=>i.value!=='').map(i=>[i.dataset.file,Number(i.value)])),main_file:this.$('main').value||null};
+        episodes:this.fileMapping(false),specials:this.fileMapping(true),main_file:this.$('main').value||null};
       await this.host.api.post(`rules/${this.rid}/tasks/${task.key}/binding`,mapping);
       this.invalidate();await this.scan();this.message('当前任务的独立设置已保存；其他下载继续跟随本番设置。');
     });
@@ -157,7 +157,7 @@ class Detail extends Panel {
       this.token=p.linkable?p.token:null;
       this.$('plan').replaceChildren(...p.items.map(i=>{
         const el=document.createElement('div');el.className='item';el.style.whiteSpace='pre-wrap';
-        el.textContent=`${i.name}\n→ ${i.target||i.reason}${i.old_targets?.length?'\n旧路径：'+i.old_targets.join(', ')+'（验证新文件后，仅清理本插件管理的文件）':''}`;return el;
+        el.textContent=`${i.name}\n→ ${i.target||i.reason}${i.notice?'\n'+i.notice:''}${i.old_targets?.length?'\n旧路径：'+i.old_targets.join(', ')+'（验证新文件后，仅清理本插件管理的文件）':''}`;return el;
       }));
       this.message(`仅当前番：${p.linkable} 个可整理，${p.held} 个待确认。`);
     });
@@ -174,6 +174,7 @@ class Detail extends Panel {
     });
     this.run(async()=>{if(!Number.isInteger(this.rid)||this.rid<1)throw new Error('无法确定当前番剧');await this.loadRule();});this.watchProgress(this.rid);
   }
+  fileMapping(special) {return Object.fromEntries([...this.$('episodes').querySelectorAll('input')].filter(i=>i.value!==''&&(i.parentElement.querySelector('select').value==='special')===special).map(i=>[i.dataset.file,Number(i.value)]));}
   mappingForm() {return {media_type:this.$('type').value,tmdb_id:Number(this.$('tmdb').value),season:this.abRule?.season??1,episode_offset:this.abRule?.episode_offset??0,episodes:{},main_file:null};}
   invalidate() {this.token=null;if(this.$('apply'))this.$('apply').disabled=true;}
   async loadRule() {
@@ -236,8 +237,9 @@ class Detail extends Panel {
     const videos=t.files.filter(f=>/\.(mkv|mp4|avi|m4v|ts|webm|mov)$/i.test(f.name));
     this.$('episodes').replaceChildren(...videos.map(f=>{
       const label=document.createElement('label');label.textContent=f.name;
-      const input=document.createElement('input');input.type='number';input.min='0';input.placeholder='自动识别';input.dataset.file=f.name;input.value=m.episodes?.[f.name]??'';
-      label.append(input);return label;
+      const input=document.createElement('input');input.type='number';input.min='0';input.placeholder='自动识别';input.dataset.file=f.name;input.value=m.specials?.[f.name]??m.episodes?.[f.name]??'';
+      const season=document.createElement('select');season.append(new Option('跟随此任务的季','regular'),new Option('特别篇 · Season 00','special'));season.value=m.specials?.[f.name]!==undefined?'special':'regular';
+      label.append(season,input);return label;
     }));
     this.$('main').replaceChildren(new Option('自动（仅单一候选时）',''),...videos.map(f=>new Option(f.name,f.name)));
     this.$('main').value=m.main_file||'';

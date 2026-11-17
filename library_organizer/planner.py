@@ -4,15 +4,17 @@ import hashlib
 import re
 from pathlib import Path, PurePosixPath
 
+from .resources import AUDIO, MUSIC, cue_images, music_directory, music_notice
+
 VIDEO = {".mkv", ".mp4", ".avi", ".m4v", ".ts", ".webm", ".mov"}
 SUBS = {".ass", ".ssa", ".srt", ".vtt", ".sup", ".sub", ".idx"}
 EXTRAS = [
     (r"(?i)\b(?:NCOP|NCED|OP|ED)(?:\d+)?\b", "extras"),
     (r"(?i)\b(?:PV|CM|trailer|teaser|preview)\s*\d*\b", "trailers"),
-    (
-        r"(?i)\b(?:making|behind.the.scenes|interview|menu|unused|april.fool)\w*\b",
-        "behind the scenes",
-    ),
+    (r"(?i)\b(?:interview)\w*\b", "interviews"),
+    (r"(?i)\b(?:making|behind.the.scenes)\w*\b", "behind the scenes"),
+    (r"(?i)\b(?:unused|deleted)\w*\b", "deleted scenes"),
+    (r"(?i)\b(?:menu|april.fool|event|OVA|OAD|SP|special|extra.episode)\w*\b", "extras"),
 ]
 
 
@@ -71,6 +73,8 @@ def classify(name):
     suffix = Path(name).suffix.lower()
     if suffix in SUBS:
         return "subtitle"
+    if suffix in AUDIO:
+        return "audio"
     if suffix not in VIDEO:
         return "resource"
     for pattern, kind in EXTRAS:
@@ -81,6 +85,69 @@ def classify(name):
     ):
         return "extras"
     return "episode"
+
+
+def destination(options, path):
+    """Only configured roots are eligible, including when revisiting an old owned path."""
+    for root in (options.library_root, options.music_root):
+        if root and Path(root).resolve() in Path(path).absolute().parents:
+            return contained(root, path)
+    raise ValueError("目标不在当前配置的媒体库目录内")
+
+
+def sidecar_candidates(name, videos, source_episodes, *, audio=False):
+    """Exact relative stem first; episode fallback only for unique main videos."""
+    path, stem = PurePosixPath(name), PurePosixPath(name).stem
+    exact = [
+        n
+        for n in videos
+        if path.parent == PurePosixPath(n).parent
+        and (stem == PurePosixPath(n).stem or stem.startswith(PurePosixPath(n).stem + "."))
+    ]
+    if exact:
+        # A longer video stem is more specific (e.g. episode vs episode.commentary).
+        length = max(len(PurePosixPath(n).stem) for n in exact)
+        return [n for n in exact if len(PurePosixPath(n).stem) == length]
+    if audio:
+        return []  # Track numbers never associate album tracks with TV episodes.
+    exact = [n for n in videos if stem == Path(n).stem or stem.startswith(Path(n).stem + ".")]
+    if exact:
+        return exact
+    ep = episode(name)
+    group = version(name, "")
+    return [
+        n
+        for n in videos
+        if classify(n) == "episode"
+        and ep is not None
+        and ep in {episode(n), source_episodes.get(n)}
+        and (not group or not version(n, "") or group == version(n, ""))
+    ]
+
+
+def sidecar_tail(name, original):
+    """Keep track labels so two subtitle/audio tracks do not silently collapse."""
+    stem, video = Path(name).stem, Path(original).stem
+    tail = stem[len(video) :] if stem.startswith(video) else stem
+    lang = "und"
+    for regex, value in [
+        (r"(?i)chs|zh-hans|zh-cn|简|(?:^|\.)sc(?:$|\.)", "zh-Hans"),
+        (r"(?i)cht|zh-hant|zh-tw|繁|(?:^|\.)tc(?:$|\.)", "zh-Hant"),
+        (r"(?i)(?:^|[. _-])(?:jpn|ja)(?:$|[. _-])", "ja"),
+        (r"(?i)(?:^|[. _-])(?:eng|en)(?:$|[. _-])", "en"),
+    ]:
+        if re.search(regex, tail):
+            lang = value
+            break
+    qualifiers = []
+    for token in tail.strip(".").split(".") if stem.startswith(video) else []:
+        if token and not re.fullmatch(
+            r"(?i)chs|cht|sc|tc|zh-hans|zh-hant|zh-cn|zh-tw|jpn|ja|eng|en|und", token
+        ):
+            qualifiers.append(clean(token))
+    if not qualifiers and "forced" in name.lower():
+        qualifiers.append("forced")
+    return "." + ".".join([lang, *qualifiers]) + Path(name).suffix.lower()
 
 
 def version(name, task_name):
@@ -106,6 +173,22 @@ def build(task, mapping, metadata, options):
     )
     entries = []
     videos = {}
+    known_videos = [
+        f["name"] for f in task["files"] if Path(f["name"]).suffix.lower() in VIDEO
+    ] + task.get("reference_videos", [])
+    extras_folder = (
+        folder / f"Season {mapping.season:02d}" if mapping.media_type == "tv" else folder
+    )
+    archive_folder = folder / "_resources" / task["key"][:8]
+    cue_files, uncertain_cues = cue_images(task["files"], options)
+
+    def archive(item, notice=""):
+        item["target"] = str(
+            archive_folder / Path(*[clean(p) for p in PurePosixPath(item["name"]).parts])
+        )
+        item["archive_root"] = str(folder / "_resources")
+        item["notice"] = notice or "按原目录结构归档，不参与 Jellyfin 扫描"
+
     media = [f for f in task["files"] if classify(f["name"]) == "episode"]
     main = mapping.main_file
     release_episode = episode(task["name"]) if len(media) == 1 else None
@@ -126,6 +209,10 @@ def build(task, mapping, metadata, options):
             "task": task["key"],
             "identity": None,
         }
+        if f.get("replay_source"):
+            item.update(
+                replay_source=f["replay_source"], replay_fingerprint=f["replay_fingerprint"]
+            )
         if f.get("progress", 0) < 1 or not f.get("fingerprint"):
             item["reason"] = "文件未完成或本地文件不可用"
             entries.append(item)
@@ -145,7 +232,12 @@ def build(task, mapping, metadata, options):
             base=base,
         )
         target = None
-        if suffix in VIDEO and (name in mapping.episodes or kind == "episode" or name == main):
+        if suffix in VIDEO and (
+            name in mapping.episodes
+            or name in mapping.specials
+            or kind == "episode"
+            or name == main
+        ):
             if mapping.media_type == "movie":
                 if name == main:
                     target = folder / (clean(options.movie_template.format(**values)) + suffix)
@@ -155,7 +247,9 @@ def build(task, mapping, metadata, options):
                 else:
                     item["reason"] = "电影含多个候选正片，请指定 main_file"
             else:
-                ep = mapping.episodes.get(name)
+                special = name in mapping.specials
+                target_season = 0 if special else mapping.season
+                ep = mapping.specials[name] if special else mapping.episodes.get(name)
                 if ep is None:
                     ep = (
                         release_episode
@@ -176,71 +270,130 @@ def build(task, mapping, metadata, options):
                         # Same zero/non-positive safeguards as AB's native renamer.
                         if ep != 0 and adjusted > 0:
                             ep = adjusted
-                if ep is None or ep not in metadata["episodes"]:
+                if ep is None or ep not in metadata.get("specials" if special else "episodes", []):
                     item["reason"] = item["reason"] or "无法对应 TMDB 集数，请在文件映射中确认"
                 else:
                     target = (
                         folder
-                        / f"Season {mapping.season:02d}"
+                        / f"Season {target_season:02d}"
                         / (
-                            clean(options.episode_template.format(**{**values, "episode": ep}))
+                            clean(
+                                options.episode_template.format(
+                                    **{**values, "episode": ep, "season": target_season}
+                                )
+                            )
                             + suffix
                         )
                     )
                     item["identity"] = {
                         "media_type": "tv",
                         "tmdb_id": mapping.tmdb_id,
-                        "season": mapping.season,
+                        "season": target_season,
                         "episode": ep,
                     }
-        elif kind == "subtitle":
+        elif kind in {"subtitle", "audio"}:
             pass  # resolved after its corresponding video
         else:
             # Preserve every ancillary file under a source-specific directory; release NFOs
             # never become episode/movie metadata that could override TMDB identities.
-            category = kind if kind != "resource" else "_resources"
-            rel = PurePosixPath(name)
-            target = (
-                folder / category / task["key"][:8] / Path(*[clean(p) for p in rel.parts])
-                if kind == "resource"
-                else folder / category / clean(Path(name).name)
-            )
+            if kind == "resource":
+                archive(item)
+            else:
+                target = extras_folder / kind / clean(Path(name).name)
         if target:
             item["target"] = str(target)
         entries.append(item)
         if suffix in VIDEO and target:
             videos[name] = str(target)
     for item in entries:
-        if item["kind"] != "subtitle" or item["reason"]:
+        if item["kind"] not in {"subtitle", "audio"} or item["reason"]:
             continue
         name = item["name"]
-        stem = Path(name).stem
-        candidates = [
-            n for n in videos if stem == Path(n).stem or stem.startswith(Path(n).stem + ".")
-        ]
-        if not candidates:
-            ep = episode(name)
-            candidates = [
-                n for n in videos if ep is not None and ep in {episode(n), source_episodes.get(n)}
-            ]
+        audio = item["kind"] == "audio"
+        if audio and not music_directory(name):
+            matches = sidecar_candidates(name, known_videos, source_episodes, audio=True)
+            if matches and any(n not in videos for n in matches):
+                archive(item, "对应视频尚未就绪，音轨先按原目录归档")
+                continue
+        candidates = (
+            []
+            if audio and music_directory(name)
+            else sidecar_candidates(name, videos, source_episodes, audio=audio)
+        )
+        if audio and not candidates:
+            if not music_directory(name) and (
+                episode(name) is not None
+                or re.search(r"(?i)commentary|comment|评论|評論|音轨|音軌", Path(name).stem)
+            ):
+                archive(item, "疑似外挂音轨但无法唯一对应视频，已归档待确认")
+            elif name in cue_files or str(PurePosixPath(name).parent) in uncertain_cues:
+                archive(item, "整轨音频或 CUE 内容不明确；先归档，不自动切轨")
+            elif Path(name).suffix.lower() not in MUSIC:
+                archive(item, "独立音轨用途或音乐格式不明确，保留原目录归档")
+            elif not options.music_root:
+                item["kind"] = "music"
+                archive(item, "尚未配置音乐库；先归档，配置后自动补整理")
+            else:
+                item["kind"] = "music"
+                item["target"] = str(
+                    Path(options.music_root)
+                    / base
+                    / task["key"][:8]
+                    / Path(*[clean(p) for p in PurePosixPath(name).parts])
+                )
+                read_path = (
+                    destination(options, item["replay_source"])
+                    if item.get("replay_source")
+                    else contained(options.source_root, item["source"])
+                )
+                item["notice"] = music_notice(read_path)
+            continue
         if len(candidates) != 1:
-            item["reason"] = "字幕无法唯一对应视频"
+            archive(
+                item,
+                "字幕无法唯一对应视频，已归档待确认"
+                if not audio
+                else "音轨无法唯一对应视频，已归档待确认",
+            )
             continue
         original = candidates[0]
         dst = Path(videos[original])
-        tail = stem[len(Path(original).stem) :] if stem.startswith(Path(original).stem) else ""
-        langs = []
-        for regex, lang in [
-            (r"(?i)chs|sc\b|zh-cn|简", "zh-Hans"),
-            (r"(?i)cht|tc\b|zh-tw|繁", "zh-Hant"),
-            (r"(?i)jpn|ja\b", "ja"),
-            (r"(?i)eng|en\b", "en"),
-        ]:
-            if re.search(regex, tail or name):
-                langs.append(lang)
-        lang = langs[0] if len(langs) == 1 else "und"
-        flag = ".forced" if "forced" in name.lower() else ""
-        item["target"] = str(dst.with_suffix("")) + "." + lang + flag + Path(name).suffix.lower()
+        item["target"] = str(dst.with_suffix("")) + sidecar_tail(name, original)
+        item["video_key"] = next(i["key"] for i in entries if i["name"] == original)
+    # Only explicit cover/lyrics files accompany music; booklet scans stay archived.
+    music = {
+        i["name"]: i
+        for i in entries
+        if i["kind"] == "music" and i["target"] and not i.get("archive_root")
+    }
+    for item in entries:
+        if item["kind"] != "resource" or item["reason"]:
+            continue
+        path = PurePosixPath(item["name"])
+        tracks = [n for n in music if PurePosixPath(n).parent == path.parent]
+        cover = path.stem.lower() in {"cover", "folder"} and path.suffix.lower() in {
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+        }
+        lyrics = path.suffix.lower() in {".lrc", ".elrc"} and any(
+            PurePosixPath(n).stem == path.stem for n in tracks
+        )
+        if cover and not tracks:
+            tracks = [
+                n
+                for n in music
+                if PurePosixPath(n).parent.parent == path.parent
+                and re.fullmatch(r"(?i)(?:disc|cd)[ _-]*\d+", PurePosixPath(n).parent.name)
+            ]
+        if tracks and (cover or lyrics):
+            album = Path(music[tracks[0]]["target"]).parent
+            if PurePosixPath(tracks[0]).parent != path.parent:
+                album = album.parent
+            item["target"] = str(album / clean(path.name))
+            item.pop("archive_root", None)
+            item["notice"] = "随专辑整理的封面或歌词；其他扫描图保持归档"
     targets = {}
     for item in entries:
         if item["target"]:
@@ -250,4 +403,9 @@ def build(task, mapping, metadata, options):
             for item in items:
                 item["reason"] = "多个源文件指向同一目标，请确认映射"
                 item["target"] = None
+    blocked = {i["key"] for i in entries if not i["target"]}
+    for item in entries:
+        if item.get("video_key") in blocked:
+            item["target"] = None
+            item["reason"] = "对应视频有冲突，暂不挂载字幕或音轨"
     return entries
