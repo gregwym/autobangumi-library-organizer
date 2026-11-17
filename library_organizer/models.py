@@ -15,6 +15,16 @@ class PathMap(BaseModel):
 class Options(BaseModel):
     source_root: str = Field(default="/downloads", title="下载根目录（AB 内路径）")
     library_root: str = Field(default="/library", title="媒体库根目录（AB 内路径）")
+    tv_subdirectory: str = Field(
+        default="Shows",
+        title="剧集分类子目录",
+        description="若媒体库根目录已是 Jellyfin 电视剧库，请留空，直接在根目录下建立番剧文件夹。",
+    )
+    movie_subdirectory: str = Field(
+        default="Movies",
+        title="电影分类子目录",
+        description="若媒体库根目录已是 Jellyfin 电影库，请留空。分类目录须对应 Jellyfin 的媒体库路径。",
+    )
     path_map: list[PathMap] = Field(default_factory=list, title="下载器路径映射")
     version_suffix: bool = Field(default=True, title="媒体库文件附加版本后缀")
     episode_template: str = Field(
@@ -34,6 +44,15 @@ class Options(BaseModel):
         default="", title="Jellyfin 内媒体库根路径（不同容器路径时填写）"
     )
     jellyfin_api_key: str = secret_field(title="Jellyfin API Key（可选）")
+
+    @field_validator("tv_subdirectory", "movie_subdirectory")
+    @classmethod
+    def subdirectory(cls, value):
+        if value and (
+            value in {".", ".."} or any(c in value for c in "/\\\x00\r\n") or not value.strip()
+        ):
+            raise ValueError("分类子目录须为空或单个目录名，不能包含路径分隔符")
+        return value
 
     @field_validator("episode_template", "movie_template")
     @classmethod

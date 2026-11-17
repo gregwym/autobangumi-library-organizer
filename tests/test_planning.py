@@ -234,3 +234,22 @@ def test_unknown_legacy_offset_is_held_instead_of_added_twice(tmp_path):
         opts,
     )
     assert all(x["target"] for x in p)
+
+
+@pytest.mark.parametrize("subdir", ["", "Shows"])
+def test_existing_jellyfin_library_can_omit_classification_folder(tmp_path, subdir):
+    task, opts = fixture(tmp_path, ["Show - 01.mkv"])
+    opts.tv_subdirectory = subdir
+    item = build(
+        task, Mapping(tmdb_id=9), {"title": "Show", "year": "2020", "episodes": [1]}, opts
+    )[0]
+    assert (
+        Path(item["target"]).parent.parent
+        == Path(opts.library_root) / subdir / "Show (2020) [tmdbid-9]"
+    )
+
+
+@pytest.mark.parametrize("subdir", ["..", "/tmp", "a/b", "a\\b"])
+def test_classification_folder_cannot_escape_root(subdir):
+    with pytest.raises(ValueError):
+        Options(tv_subdirectory=subdir)

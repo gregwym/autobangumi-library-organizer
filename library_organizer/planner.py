@@ -99,7 +99,11 @@ def build(task, mapping, metadata, options):
     year = metadata.get("year", "")
     base = clean(f"{title} ({year})" if year else title) + f" [tmdbid-{mapping.tmdb_id}]"
     root = Path(options.library_root)
-    folder = root / ("Shows" if mapping.media_type == "tv" else "Movies") / base
+    folder = (
+        root
+        / (options.tv_subdirectory if mapping.media_type == "tv" else options.movie_subdirectory)
+        / base
+    )
     entries = []
     videos = {}
     media = [f for f in task["files"] if classify(f["name"]) == "episode"]
