@@ -7,6 +7,7 @@ import secrets
 import time
 from pathlib import Path
 
+from .collections import update_collections
 from .models import Mapping
 from .planner import build, contained, destination, fingerprint
 from .transfer import publish
@@ -85,9 +86,7 @@ class Engine:
         return self.store
 
     def settings_digest(self):
-        return digest(
-            {"layout": 3, "options": self.options.model_dump(exclude={"jellyfin_api_key"})}
-        )
+        return digest({"layout": 4, "options": self.options.model_dump()})
 
     def ownership(self, item, target):
         return next((r for r in self.store.owned(item["key"]) if r["target"] == str(target)), None)
@@ -359,13 +358,11 @@ class Engine:
                 self.store.set(
                     f"last_results:rule:{rid}", previous + [r for r in results if r["key"] in keys]
                 )
-            refresh = (
-                await self.bridge.refresh_jellyfin()
-                if any(r.get("changed") for r in results)
-                else "无新增链接"
+            collections = await asyncio.to_thread(
+                update_collections, self.store, self.options, plan["items"], results
             )
-            self.store.set("jellyfin_refresh", refresh)
-            return {"results": results, "backup": backup, "jellyfin": refresh}
+            self.store.set("collection_results", collections)
+            return {"results": results, "backup": backup, "collections": collections}
 
     async def tick(self):
         if not self.store.get("active", False) or not self.store.get("automatic", False):
@@ -376,12 +373,12 @@ class Engine:
             return
         try:
             plan = await self.preview(bound_only=True)
-            signature = digest(plan["items"])
+            signature = digest({"items": plan["items"], "settings": self.settings_digest()})
             last = self.store.get("automatic_signature")
             if last == signature:
                 return
             result = await self.apply(plan["token"])
-            failed = any(r["state"] == "failed" for r in result["results"])
+            failed = any(r["state"] == "failed" for r in result["results"] + result["collections"])
             if failed:
                 attempts = min(self.store.get("attempts", 0) + 1, 8)
                 self.store.set("attempts", attempts)

@@ -2,7 +2,6 @@ from pathlib import Path
 from string import Formatter
 from typing import Literal
 
-from ab_sdk import secret_field
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 
@@ -44,11 +43,11 @@ class Options(BaseModel):
         max_length=512,
         description="不含扩展名。base 为作品名、年份与 TMDB ID；version 为组名后缀。默认值适合 Jellyfin。",
     )
-    jellyfin_url: str = Field(default="", title="Jellyfin 地址（可选）")
-    jellyfin_library_root: str = Field(
-        default="", title="Jellyfin 内媒体库根路径（不同容器路径时填写）"
+    collections_root: str = Field(
+        default="",
+        title="音乐合集清单目录（可选）",
+        description="生成 collection.xml，交给媒体服务器的合集库扫描。须与音乐库、视频库、下载目录分开；两容器内的音乐路径须一致。不连接媒体服务器 API。",
     )
-    jellyfin_api_key: str = secret_field(title="Jellyfin API Key（可选）")
 
     @field_validator("tv_subdirectory", "movie_subdirectory")
     @classmethod
@@ -93,6 +92,16 @@ class Options(BaseModel):
                 music == root or music in root.parents or root in music.parents for root in (a, b)
             ):
                 raise ValueError("音乐库必须与下载和视频库目录分开，不能重叠")
+        if self.collections_root:
+            collection = Path(self.collections_root)
+            if not self.music_root or not collection.is_absolute():
+                raise ValueError("合集目录须为绝对路径，且须先配置音乐库")
+            collection = collection.resolve()
+            if any(
+                collection == root or collection in root.parents or root in collection.parents
+                for root in (a, b, Path(self.music_root).resolve())
+            ):
+                raise ValueError("合集目录不能与下载、视频库、音乐库重叠")
         for m in self.path_map:
             if not Path(m.remote).is_absolute() or not Path(m.local).is_absolute():
                 raise ValueError("路径映射必须使用绝对路径")

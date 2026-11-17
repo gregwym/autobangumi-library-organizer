@@ -83,11 +83,11 @@ RSS、搜索、手动、补集、重试必须经过同一个 `download.preflight
 
 0.6.0 的附带资源策略：视频特典归所属季；单个文件可明确覆盖为 Season 00 特别篇，不改变同任务正片季度。音乐使用可选独立输出根目录，未配置则归档；配置后可重新评估既有归档，甚至在下载任务移除后使用已验证的插件自有副本。重放仍须核对当前 AB entry 归属、绑定、源身份和副本 fingerprint，不因媒体库身份相同跨 entry。目标类型应扩展为 video / music / archive，归档可成为后续受控迁移的数据源，不能只依赖下载器当前文件列表。部分资源重放不能抹去同任务的正片整理历史。字幕/音轨对视频的依赖也应包含在计划中，视频目标冲突时阻止发布孤立的 sidecar。
 
-### 新事件与 Jellyfin
+### 新事件与媒体服务器职责边界
 
 `library.files_committed` 应包含实际媒体库路径及媒体身份，供媒体服务器刷新、NFO、通知使用。不要把下载目录路径复用为媒体库路径。事件至少一次投递，带稳定 operation_id，订阅者幂等。
 
-扫描请求成功 ≠ 识别成功。可选 `library.verify` 按媒体库路径、作品 provider id、季集号对账，包含 Jellyfin MediaSources 多版本路径；不自动覆盖用户元数据。附加资源保存率和可播放媒体识别率分别报告。
+扫描请求成功 ≠ 识别成功。由独立媒体服务器插件提供可选 `library.verify` 按媒体库路径、作品 provider id、季集号对账，包含 Jellyfin MediaSources 多版本路径；不自动覆盖用户元数据。附加资源保存率和可播放媒体识别率分别报告。
 
 ## 5. 共享维护和更新 API
 
@@ -112,4 +112,8 @@ AB 4.0 的 `scheduled_task` ID 是全局唯一，两个插件都使用 `check-up
 
 ## Jellyfin 刷新认证兼容性
 
-AB 内置 media-server-refresh 使用旧 `X-Emby-Token`。Jellyfin 12 默认禁用旧认证，现有有效 API Key 也会返回 401；当前整理插件刷新与核对统一使用 `Authorization: MediaBrowser Token="..."`。后续上游 PR 应同步修正内置刷新插件并增加拒绝旧认证头的回归测试，不要求用户重新生成密钥或开启旧认证。参考 [Jellyfin 12 发布说明](https://jellyfin.org/posts/jellyfin-release-12.0/)。
+AB 内置 media-server-refresh 使用旧 `X-Emby-Token`。Jellyfin 12 默认禁用旧认证，现有有效 API Key 也会返回 401；0.6.0 整理插件曾使用 `Authorization: MediaBrowser Token="..."`；0.7.0 已移除整个媒体服务器 API 集成，改为文件驱动。后续上游 PR 应同步修正内置刷新插件并增加拒绝旧认证头的回归测试，不要求用户重新生成密钥或开启旧认证。参考 [Jellyfin 12 发布说明](https://jellyfin.org/posts/jellyfin-release-12.0/)。
+
+## 文件驱动音乐关联（0.7.0）
+
+整理器仅输出音乐文件和自有 `collection.xml` 清单，不依赖 Jellyfin URL、API Key、item ID 或媒体路径翻译。音乐容器路径需一致；媒体服务器的库创建、扫描、验证由管理员或独立集成处理。上游文件提交事件可通知已有刷新插件，刷新插件持有权限，不应倒置到整理器。Music 与 collections 输出根目录独立；增量合集聚合只纳入已成功发布且所有权验证通过的专辑，跨 entry 可聚合到同一作品，但每次文件整理仍保持 entry 隔离。

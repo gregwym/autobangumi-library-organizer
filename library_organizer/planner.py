@@ -4,7 +4,7 @@ import hashlib
 import re
 from pathlib import Path, PurePosixPath
 
-from .resources import AUDIO, MUSIC, cue_images, music_directory, music_notice
+from .resources import AUDIO, MUSIC, cue_images, music_directory, music_notice, music_tags
 
 VIDEO = {".mkv", ".mp4", ".avi", ".m4v", ".ts", ".webm", ".mov"}
 SUBS = {".ass", ".ssa", ".srt", ".vtt", ".sup", ".sub", ".idx"}
@@ -347,6 +347,11 @@ def build(task, mapping, metadata, options):
                     else contained(options.source_root, item["source"])
                 )
                 item["notice"] = music_notice(read_path)
+                item["music_tags"] = {
+                    key: value
+                    for key, value in (music_tags(read_path) or {}).items()
+                    if key in {"ALBUM", "ALBUMARTIST", "DISCNUMBER", "DISCTOTAL", "TOTALDISCS"}
+                }
             continue
         if len(candidates) != 1:
             archive(
@@ -360,6 +365,59 @@ def build(task, mapping, metadata, options):
         dst = Path(videos[original])
         item["target"] = str(dst.with_suffix("")) + sidecar_tail(name, original)
         item["video_key"] = next(i["key"] for i in entries if i["name"] == original)
+    # A multi-disc set can use catalog numbers rather than Disc folders. Normalize
+    # only sibling directories whose embedded album/artist/disc tags agree.
+    music_entries = [
+        i for i in entries if i["kind"] == "music" and i["target"] and not i.get("archive_root")
+    ]
+    disc_groups = {}
+    parents = {}
+    for item in music_entries:
+        parent = Path(item["target"]).parent
+        parents.setdefault(parent, []).append(item)
+    for parent, tracks in parents.items():
+        identities = set()
+        for item in tracks:
+            tags = item.get("music_tags", {})
+            disc = tags.get("DISCNUMBER", "").split("/")[0]
+            total = tags.get("DISCTOTAL", tags.get("TOTALDISCS", ""))
+            if (
+                tags.get("ALBUM")
+                and tags.get("ALBUMARTIST")
+                and disc.isdecimal()
+                and total.isdecimal()
+                and 1 <= int(disc) <= int(total)
+                and int(total) > 1
+            ):
+                identities.add((tags["ALBUM"], tags["ALBUMARTIST"], int(disc), int(total)))
+            else:
+                identities.add(None)
+        if len(identities) == 1 and None not in identities:
+            album, artist, disc, total = next(iter(identities))
+            disc_groups.setdefault((parent.parent, album, artist, total), []).append((parent, disc))
+    normalized = {}
+    for (album_parent, _, _, total), discs in disc_groups.items():
+        numbers = [disc for _, disc in discs]
+        if len(discs) > 1 and len(set(numbers)) == len(numbers):
+            normalized.update(
+                {
+                    parent: (album_parent / f"Disc {disc:02d}", album_parent)
+                    for parent, disc in discs
+                }
+            )
+    for item in music_entries:
+        target = Path(item["target"])
+        parent = target.parent
+        if parent in normalized:
+            directory, album = normalized[parent]
+            item["target"] = str(directory / target.name)
+        else:
+            album = (
+                parent.parent if re.fullmatch(r"(?i)(?:disc|cd)[ _-]*\d+", parent.name) else parent
+            )
+        item["album_target"] = str(album)
+        item["collection"] = {"key": f"{mapping.media_type}:{mapping.tmdb_id}", "title": title}
+        item.pop("music_tags", None)
     # Only explicit cover/lyrics files accompany music; booklet scans stay archived.
     music = {
         i["name"]: i

@@ -79,7 +79,7 @@ class LibraryOrganizer(Plugin[Options]):
                 "health": self.bridge.health(),
                 "error": self.store.get("error"),
                 "results": result_rows(self.store.get("last_results", [])),
-                "jellyfin": self.store.get("jellyfin_refresh"),
+                "collections": self.store.get("collection_results", []),
                 "update": self.updater.status(),
             }
 
@@ -238,21 +238,6 @@ class LibraryOrganizer(Plugin[Options]):
             except ValueError as e:
                 raise HTTPException(409, str(e)) from e
 
-        @router.post("/rules/{rid}/jellyfin/verify")
-        async def rule_verify(rid: int):
-            await require_rule(rid)
-            from .jellyfin import verify
-
-            try:
-                return await verify(
-                    self.config,
-                    [i for i in self.store.get("last_items", []) if i.get("rule_id") == rid],
-                )
-            except ValueError as e:
-                raise HTTPException(422, str(e)) from e
-            except Exception as e:
-                raise HTTPException(502, "Jellyfin 核对失败，请检查连接设置") from e
-
         @router.get("/search")
         async def search(query: str, kind: str = "tv"):
             try:
@@ -319,21 +304,6 @@ class LibraryOrganizer(Plugin[Options]):
                 self.store.set("retry_at", 0)
                 self.store.set("automatic_signature", None)
             return {"automatic": body.enabled}
-
-        @router.post("/jellyfin/refresh")
-        async def refresh():
-            return {"status": await self.bridge.refresh_jellyfin()}
-
-        @router.post("/jellyfin/verify")
-        async def verify_library():
-            from .jellyfin import verify
-
-            try:
-                return await verify(self.config, self.store.get("last_items", []))
-            except ValueError as e:
-                raise HTTPException(422, str(e)) from e
-            except Exception as e:
-                raise HTTPException(502, "Jellyfin 核对失败，请检查连接设置") from e
 
         @router.get("/update")
         async def update_status():

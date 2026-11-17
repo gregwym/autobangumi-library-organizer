@@ -329,18 +329,19 @@ async def test_foreign_ignore_file_is_not_replaced(scoped):
     assert (archive / ".ignore").read_text() == "*.log"
 
 
-async def test_new_ignore_marker_refreshes_even_when_archives_already_exist(scoped):
+async def test_new_ignore_marker_without_media_server_calls(scoped):
     x = scoped
     add_music(x, "a")
     p = await x.engine.preview(rule_id=x.a.id)
     await x.engine.apply(p["token"], rule_id=x.a.id)
     archive = next(Path(i["archive_root"]) for i in p["items"] if i.get("archive_root"))
     (archive / ".ignore").unlink()  # Simulate archives made by the previous plugin version.
-    previous = x.bridge.refresh_jellyfin.await_count
     p = await x.engine.preview(rule_id=x.a.id)
     r = await x.engine.apply(p["token"], rule_id=x.a.id)
     assert all(i["action"] == "unchanged" for i in r["results"])
-    assert x.bridge.refresh_jellyfin.await_count == previous + 1
+    x.bridge.refresh_jellyfin.assert_not_awaited()
+    assert (archive / ".ignore").read_bytes() == b""
     p = await x.engine.preview(rule_id=x.a.id)
     await x.engine.apply(p["token"], rule_id=x.a.id)
-    assert x.bridge.refresh_jellyfin.await_count == previous + 1
+    x.bridge.refresh_jellyfin.assert_not_awaited()
+    assert (archive / ".ignore").read_bytes() == b""

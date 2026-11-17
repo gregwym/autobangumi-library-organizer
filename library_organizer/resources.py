@@ -54,10 +54,10 @@ def cue_images(files, options):
     return images, uncertain
 
 
-def music_notice(path):
+def music_tags(path):
     """Read bounded FLAC Vorbis comments; unsupported metadata stays explicitly unknown."""
     if Path(path).suffix.lower() != ".flac":
-        return "按原专辑目录整理；未校验音频标签，Jellyfin 按内嵌标签识别"
+        return None
     try:
         with open(path, "rb") as handle:
             if handle.read(4) != b"fLaC":
@@ -104,17 +104,24 @@ def music_notice(path):
                 handle.seek(size, 1)
                 if header[0] & 128:
                     break
-        missing = [
-            label
-            for key, label in (("ALBUM", "专辑"), ("TITLE", "曲名"), ("TRACKNUMBER", "曲号"))
-            if key not in tags
-        ]
-        if not (tags.get("ALBUMARTIST") or tags.get("ARTIST")):
-            missing.append("艺术家")
-        return (
-            "音乐标签缺少" + "、".join(missing) + "；保留原目录，建议补标签"
-            if missing
-            else "按原专辑目录整理，保留内嵌音乐标签"
-        )
+        return tags
     except OSError, ValueError, UnicodeError:
+        return None
+
+
+def music_notice(path):
+    tags = music_tags(path)
+    if tags is None:
         return "无法校验音乐标签；保留原专辑目录，建议检查标签"
+    missing = [
+        label
+        for key, label in (("ALBUM", "专辑"), ("TITLE", "曲名"), ("TRACKNUMBER", "曲号"))
+        if key not in tags
+    ]
+    if not (tags.get("ALBUMARTIST") or tags.get("ARTIST")):
+        missing.append("艺术家")
+    return (
+        "音乐标签缺少" + "、".join(missing) + "；保留原目录，建议补标签"
+        if missing
+        else "按原专辑目录整理，保留内嵌音乐标签"
+    )

@@ -54,13 +54,13 @@ class Panel extends HTMLElement {
 class Settings extends Panel {
   connectedCallback() {
     this.mount(`<details open><summary>媒体库整理 · 全局设置</summary><div class="body">
-      <p>下载根目录、视频库、可选音乐库、版本后缀和 Jellyfin 连接在插件配置中统一设置。优先硬链，不支持时依次尝试 Reflink、普通复制（占用额外空间）。</p>
-      <p class="muted">音乐库留空时先归档；配置后自动补整理已归档音乐。音乐目录须对应 Jellyfin 中单独的音乐库。字体、扫描图和其他附件保留原目录归档。</p><p class="muted">每部番的 TMDB 绑定、季集映射和整理预览，请到「番剧详情 → 媒体库」。</p>
+      <p>下载根目录、视频库、可选音乐库、版本后缀和合集清单目录在插件配置中统一设置。优先硬链，不支持时依次尝试 Reflink、普通复制（占用额外空间）。</p>
+      <p class="muted">音乐库留空时先归档；配置后自动补整理已归档音乐。音乐目录须对应独立音乐库；合集目录供合集库扫描，两个容器内的音乐路径须相同。插件不持有媒体服务器 API 凭据。字体、扫描图和其他附件保留原目录归档。</p><p class="muted">每部番的 TMDB 绑定、季集映射和整理预览，请到「番剧详情 → 媒体库」。</p>
       <div class="row"><span id="state" class="badge"></span><button id="activate">接管整理</button></div>
       <label><input id="automatic" type="checkbox">自动整理已绑定的番剧</label>
       <small>开启后每分钟检查完成的下载，包括已绑定但尚未整理的旧下载。关闭后仍可在番剧详情手动预览、整理。</small>
       <p class="muted">接管会备份配置并关闭原生整理与硬链。下载文件保留原名，停用自动整理不会删除已建链接。</p>
-      <div class="row"><button id="status">刷新状态</button><button id="refresh">刷新 Jellyfin</button></div>
+      <div class="row"><button id="status">刷新状态</button></div>
       ${progressMarkup}<div id="message" role="status"></div>
       <div class="row"><span id="version"></span><button id="check">检查更新</button><button id="update" hidden></button></div>
       <small>每 6 小时检查新版，点击一次更新；更新前备份，启动失败恢复旧代码。</small>
@@ -74,7 +74,6 @@ class Settings extends Panel {
       finally {await this.status();}
     });
     this.action('status',()=>this.status());
-    this.action('refresh',async()=>this.message((await this.host.api.post('jellyfin/refresh',{})).status));
     this.action('check',async()=>this.updateStatus(await this.host.api.post('update/check',{})));
     this.action('update',async()=>{
       this.message('正在备份并更新…');
@@ -85,7 +84,8 @@ class Settings extends Panel {
   async status() {
     const s=await this.host.api.get('status');
     this.$('state').textContent=s.active?'已接管':'预览模式';this.$('automatic').checked=s.automatic;
-    this.message(s.error||(s.results?.length?'上次整理：'+summary(s.results):'尚未执行整理。'),Boolean(s.error));
+    const reports=(s.collections||[]).map(x=>x.detail).join('\n');
+    this.message(s.error||[(s.results?.length?'上次整理：'+summary(s.results):'尚未执行整理。'),reports].filter(Boolean).join('\n'),Boolean(s.error));
     this.updateStatus(s.update);
   }
   updateStatus(u) {
@@ -119,7 +119,7 @@ class Detail extends Panel {
         <p class="muted">仅在确定任务属于本番时关联；不会改动下载器标签或文件。</p>
         <select id="unassigned"></select><div class="row"><button id="assign">关联到本番</button></div>
       </div></details>
-      <div class="row"><button id="preview">预览本番整理计划</button><button id="apply" class="primary" disabled>执行此计划</button><button id="verify">核对 Jellyfin 识别</button></div>
+      <div class="row"><button id="preview">预览本番整理计划</button><button id="apply" class="primary" disabled>执行此计划</button></div>
       <div id="plan" class="plan"></div><details id="result-panel" hidden><summary>上次整理明细</summary><div id="results" class="table-scroll"></div><div class="row"><button id="result-prev">上一页</button><span id="result-page"></span><button id="result-next">下一页</button></div></details>${progressMarkup}<div id="message" role="status"></div>`);
     for(const id of ['type','query','tmdb'])this.$(id).oninput=()=>{this.dirty=true;this.invalidate();};
     this.action('search',async()=>{
@@ -164,14 +164,10 @@ class Detail extends Panel {
     this.action('apply',async()=>{
       const token=this.token;this.invalidate();this.message('正在核对下载和配置，随后开始整理…');
       const r=await this.host.api.post(`rules/${this.rid}/apply`,{token});
-      this.renderResults(r.results);this.message(summary(r.results)+'\n'+r.jellyfin+'\n'+r.results.filter(x=>x.state==='failed').map(x=>x.detail).join('\n'));
+      this.renderResults(r.results);this.message(summary(r.results)+'\n'+(r.collections||[]).map(x=>x.detail).join('\n')+'\n'+r.results.filter(x=>x.state==='failed').map(x=>x.detail).join('\n'));
     });
     this.action('result-prev',()=>{this.resultPage--;this.renderResultPage();});
     this.action('result-next',()=>{this.resultPage++;this.renderResultPage();});
-    this.action('verify',async()=>{
-      const rows=await this.host.api.post(`rules/${this.rid}/jellyfin/verify`,{});
-      this.message(rows.length?rows.map(r=>`${r.state} · ${r.path} · ${r.detail}`).join('\n'):'本番暂无已执行的正片映射可核对。');
-    });
     this.run(async()=>{if(!Number.isInteger(this.rid)||this.rid<1)throw new Error('无法确定当前番剧');await this.loadRule();});this.watchProgress(this.rid);
   }
   fileMapping(special) {return Object.fromEntries([...this.$('episodes').querySelectorAll('input')].filter(i=>i.value!==''&&(i.parentElement.querySelector('select').value==='special')===special).map(i=>[i.dataset.file,Number(i.value)]));}

@@ -23,6 +23,7 @@ class Bridge40:
 
         if VERSION != "4.0.0":
             raise ValueError("此适配层仅支持 AB 4.0.0")
+        self.remove_legacy_media_server_options()
         self.original = Renamer.rename
         bridge = self
 
@@ -33,6 +34,30 @@ class Bridge40:
 
         self.wrapper = guarded
         Renamer.rename = guarded
+
+    def remove_legacy_media_server_options(self):
+        from module.conf import settings
+        from module.conf.config import CONFIG_PATH
+
+        previous = settings.plugins.options.get("library-organizer", {})
+        legacy = {"jellyfin_url", "jellyfin_api_key", "jellyfin_library_root"}
+        if not legacy.intersection(previous):
+            return
+        cleaned = {key: value for key, value in previous.items() if key not in legacy}
+        backup = self.store.backup()
+        if CONFIG_PATH.exists():
+            shutil.copy2(CONFIG_PATH, backup / "config.json")
+            os.chmod(backup / "config.json", 0o600)
+        data = settings.model_dump()
+        data["plugins"]["options"]["library-organizer"] = cleaned
+        temporary = CONFIG_PATH.with_name(CONFIG_PATH.name + ".organizer.tmp")
+        with temporary.open("w") as handle:
+            os.chmod(temporary, 0o600)
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, CONFIG_PATH)
+        settings.plugins.options["library-organizer"] = cleaned
 
     def teardown(self):
         from module.manager.renamer import Renamer
@@ -335,24 +360,6 @@ class Bridge40:
             raise ValueError("TMDB 条目没有标题")
         self.store.set(key, {"at": time.time(), "data": result})
         return result
-
-    async def refresh_jellyfin(self):
-        import httpx
-
-        from .jellyfin import auth_headers
-
-        if not self.options.jellyfin_url or not self.options.jellyfin_api_key:
-            return "未配置"
-        try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                r = await client.post(
-                    self.options.jellyfin_url.rstrip("/") + "/Library/Refresh",
-                    headers=auth_headers(self.options.jellyfin_api_key),
-                )
-                r.raise_for_status()
-            return "已请求扫描（不代表识别验证完成）"
-        except Exception:
-            return "扫描请求失败；硬链已保留，可重试"
 
     async def rule(self, rule_id):
         from module.database import Database
