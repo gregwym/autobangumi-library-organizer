@@ -117,8 +117,72 @@ def test_music_keeps_album_layout_and_only_explicit_cover_and_lyrics(tmp_path):
     rows = plan(task, opts)
     assert all(x["target"].startswith(opts.music_root) for x in rows[:3])
     assert rows[0]["target"].endswith("CDs/Album/Disc 1/01.flac")
+    assert Path(rows[0]["target"]).relative_to(opts.music_root).parts == (
+        "Show [tmdbid-9]",
+        "CDs",
+        "Album",
+        "Disc 1",
+        "01.flac",
+    )
     assert all(x.get("archive_root") for x in rows[3:])
     assert rows[5]["target"].endswith("Fonts/Fonts.7z")
+
+
+@pytest.mark.parametrize("user_file", [False, True])
+async def test_legacy_music_hash_migrates_manifest_and_incremental_tracks(
+    scoped, tmp_path, user_file
+):
+    import xml.etree.ElementTree as ET
+
+    from library_organizer.collections import update_collections
+
+    x = scoped
+    add_music(x, "a")
+    add_music(x, "a", cover=True)
+    music = tmp_path / "music"
+    collections = tmp_path / "collections"
+    music.mkdir()
+    collections.mkdir()
+    x.engine.options.music_root = str(music)
+    x.engine.options.collections_root = str(collections)
+    preview = await x.engine.preview(rule_id=x.a.id)
+    # Reproduce a previously owned layout without depending on the old planner.
+    old_items = []
+    for item in preview["items"]:
+        item = dict(item)
+        if item["target"].startswith(str(music) + "/"):
+            rel = Path(item["target"]).relative_to(music)
+            old_root = music / rel.parts[0] / item["task"][:8]
+            item["target"] = str(old_root.joinpath(*rel.parts[1:]))
+            if item.get("album_target"):
+                album = Path(item["album_target"]).relative_to(music)
+                item["album_target"] = str(old_root.joinpath(*album.parts[1:]))
+        old_items.append(item)
+    results = x.engine.run_items(old_items, x.a.id)
+    update_collections(x.store, x.engine.options, old_items, results)
+    old_track = next(Path(i["target"]) for i in old_items if i["kind"] == "music")
+    before = fingerprint(old_track)
+    marker = old_root / "user.txt"
+    if user_file:
+        marker.write_text("user data")
+    preview = await x.engine.preview(rule_id=x.a.id)
+    result = await x.engine.apply(preview["token"], rule_id=x.a.id)
+    assert all(i["state"] != "failed" for i in result["results"])
+    track = next(Path(i["target"]) for i in preview["items"] if i["kind"] == "music")
+    assert fingerprint(track) == before and not old_track.exists()
+    assert old_root.exists() == user_file
+    if user_file:
+        assert marker.read_text() == "user data"
+    manifest = next(collections.rglob("collection.xml"))
+    paths = [p.text for p in ET.parse(manifest).findall(".//CollectionItem/Path")]
+    assert paths == [str(track.parent)]
+    # A later completed download goes directly into the same album, without a hash.
+    path = x.root / "a/CDs/Album/02.flac"
+    path.write_bytes(b"new track")
+    x.files["a" * 40].append({"index": 3, "name": "a/CDs/Album/02.flac", "size": 9, "progress": 1})
+    await x.engine.tick()
+    assert (track.parent / "02.flac").read_bytes() == b"new track"
+    assert old_root.exists() == user_file
 
 
 @pytest.mark.parametrize(
@@ -401,3 +465,36 @@ async def test_resources_binding_preserves_video_and_handles_incremental_music(s
         assert all(fingerprint(Path(p)) == fp for p, fp in original.items())
         assert not list(Path(x.engine.options.library_root).rglob("*S01*"))
     assert len(x.store.owned()) == len(original) + 2
+
+
+async def test_hash_free_music_collision_never_overwrites_other_entry(scoped, tmp_path):
+    x = scoped
+    music = tmp_path / "music"
+    music.mkdir()
+    x.engine.options.music_root = str(music)
+    for char in ("a", "b"):
+        path = x.root / f"{char}.flac"
+        path.write_bytes(char.encode())
+        x.files[char * 40].append({"index": 1, "name": f"{char}.flac", "size": 1, "progress": 1})
+    scan = x.bridge.scan
+
+    async def same_album(**kwargs):
+        tasks = await scan(**kwargs)
+        for task in tasks:
+            for f in task["files"]:
+                if f["name"].endswith(".flac"):
+                    f["name"] = "CDs/Album/01.flac"
+        return tasks
+
+    x.bridge.scan = same_album
+    preview = await x.engine.preview()
+    tracks = [i for i in preview["items"] if i["kind"] == "music"]
+    assert len(tracks) == 2 and all(not i["target"] for i in tracks)
+    assert all("重名" in i["reason"] for i in tracks)
+    first = await x.engine.preview(rule_id=x.a.id)
+    await x.engine.apply(first["token"], rule_id=x.a.id)
+    track = next(Path(i["target"]) for i in first["items"] if i["kind"] == "music")
+    second = await x.engine.preview(rule_id=x.b.id)
+    held = next(i for i in second["items"] if i["kind"] == "music")
+    assert not held["target"] and "目标已存在" in held["reason"]
+    assert track.read_bytes() == b"a"

@@ -338,7 +338,6 @@ def build(task, mapping, metadata, options):
                 item["target"] = str(
                     Path(options.music_root)
                     / base
-                    / task["key"][:8]
                     / Path(*[clean(p) for p in PurePosixPath(name).parts])
                 )
                 read_path = (

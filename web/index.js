@@ -55,7 +55,7 @@ class Settings extends Panel {
   connectedCallback() {
     this.mount(`<details open><summary>媒体库整理 · 全局设置</summary><div class="body">
       <p>下载根目录、视频库、可选音乐库、版本后缀和合集清单目录在插件配置中统一设置。优先硬链，不支持时依次尝试 Reflink、普通复制（占用额外空间）。</p>
-      <p class="muted">音乐库留空时先归档；配置后自动补整理已归档音乐。音乐目录须对应独立音乐库；合集目录供合集库扫描，两个容器内的音乐路径须相同。插件不持有媒体服务器 API 凭据。字体、扫描图和其他附件保留原目录归档。</p><p class="muted">每部番的 TMDB 绑定、季集映射和整理预览，请到「番剧详情 → 媒体库」。</p>
+      <p class="muted">音乐库留空时先归档；配置后自动补整理已归档音乐。专辑与合集清单均须纳入媒体服务器扫描，两个容器内的音乐路径须相同。插件不持有媒体服务器 API 凭据。字体、扫描图和其他附件保留原目录归档。</p><p class="muted">每部番的 TMDB 绑定、季集映射和整理预览，请到「番剧详情 → 媒体库」。</p>
       <div class="row"><span id="state" class="badge"></span><button id="activate">接管整理</button></div>
       <label><input id="automatic" type="checkbox">自动整理已绑定的番剧</label>
       <small>开启后每分钟检查完成的下载，包括已绑定但尚未整理的旧下载。关闭后仍可在番剧详情手动预览、整理。</small>

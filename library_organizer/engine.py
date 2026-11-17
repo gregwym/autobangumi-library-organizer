@@ -86,7 +86,7 @@ class Engine:
         return self.store
 
     def settings_digest(self):
-        return digest({"layout": 4, "options": self.options.model_dump()})
+        return digest({"layout": 5, "options": self.options.model_dump()})
 
     def ownership(self, item, target):
         return next((r for r in self.store.owned(item["key"]) if r["target"] == str(target)), None)
@@ -274,6 +274,7 @@ class Engine:
                         detail = "旧路径已改变，已保留"
                         continue
                     old_path.unlink()
+                    self.prune_empty_music_directories(old_path.parent)
                 obsolete.append(old)
             label = {"hardlink": "硬链", "reflink": "Reflink", "copy": "普通复制"}[method]
             if action == "relocated":
@@ -291,6 +292,19 @@ class Engine:
         except (OSError, ValueError) as e:
             # Preserve any existing ownership record; failed plans can be retried safely.
             return {"key": item["key"], "state": "failed", "detail": str(e)}
+
+    def prune_empty_music_directories(self, directory):
+        """Remove empty old music wrappers after verified file relocation only."""
+        if not self.options.music_root:
+            return
+        root = Path(self.options.music_root).resolve()
+        while root in directory.parents:
+            try:
+                directory = contained(root, directory)
+                directory.rmdir()
+            except OSError, ValueError:
+                break
+            directory = directory.parent
 
     def ensure_archive(self, root):
         root = contained(self.options.library_root, root)

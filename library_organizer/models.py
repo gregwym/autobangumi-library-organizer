@@ -46,7 +46,7 @@ class Options(BaseModel):
     collections_root: str = Field(
         default="",
         title="音乐合集清单目录（可选）",
-        description="生成 collection.xml，交给媒体服务器的合集库扫描。须与音乐库、视频库、下载目录分开；两容器内的音乐路径须一致。不连接媒体服务器 API。",
+        description="生成 collection.xml，清单与专辑都须在媒体服务器扫描范围内。输出目录须与音乐、视频、下载目录互不包含；两容器内的音乐路径须一致。不连接媒体服务器 API。",
     )
 
     @field_validator("tv_subdirectory", "movie_subdirectory")
