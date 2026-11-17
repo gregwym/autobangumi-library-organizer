@@ -1,7 +1,7 @@
 const css=`:host{display:block;font:14px/1.5 var(--ab-font-family,system-ui);color:var(--ab-color-text,#222)}*{box-sizing:border-box}details{border:1px solid var(--ab-color-border,#ddd);border-radius:var(--ab-radius-md,8px);overflow:hidden}summary{padding:7px 14px;font-weight:600;cursor:pointer;color:var(--ab-color-text-secondary,#666)}.body{padding:14px;background:var(--ab-color-surface,#fff);border-top:1px solid var(--ab-color-border,#ddd)}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}input,select,button,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--ab-color-border,#aaa);border-radius:6px;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.primary{background:var(--ab-color-primary,#5274d9);color:white}label{display:grid;gap:5px;margin:8px 0}label:has(input[type=checkbox]){display:flex;align-items:center;gap:8px}input[type=checkbox]{width:auto;margin:0;accent-color:var(--ab-color-primary,#526fe4)}select,textarea{max-width:100%;width:100%}textarea{min-height:70px}small,.muted{color:var(--ab-color-text-secondary,#777)}.plan{max-height:400px;overflow:auto}.item{border-bottom:1px solid var(--ab-color-border,#ddd);padding:9px 0;overflow-wrap:anywhere}#message{white-space:pre-wrap;margin-top:10px}.badge{border-radius:999px;padding:2px 9px;background:#8882}.error{color:#c65540}[hidden]{display:none!important}`;
 const stateNames = {linked:'已整理',exists:'已有链接',held:'待确认',failed:'失败'};
 function summary(rows) {
-  const counts={}; for(const r of rows)counts[r.state]=(counts[r.state]||0)+1;
+  const counts={}; for(const r of rows){const key=r.state==='linked'&&r.method?({hardlink:'硬链',reflink:'Reflink',copy:'普通复制'}[r.method]||r.state):r.state;counts[key]=(counts[key]||0)+1;}
   return Object.entries(counts).map(([key,n])=>`${stateNames[key]||key} ${n}`).join(' · ');
 }
 class Panel extends HTMLElement {
@@ -18,7 +18,7 @@ class Panel extends HTMLElement {
     const controls=[...this.shadowRoot.querySelectorAll('button,input,select')];
     const disabled=controls.map(c=>c.disabled);
     controls.forEach(c=>c.disabled=true);
-    try {await fn();} catch(e) {this.message(e.message||String(e),true);}
+    try {await fn();} catch(e) {this.message(typeof e.message==='string'?e.message:JSON.stringify(e.message||e),true);}
     finally {
       controls.forEach((c,i)=>c.disabled=disabled[i]);
       this.busy=false;
@@ -29,7 +29,7 @@ class Panel extends HTMLElement {
 class Settings extends Panel {
   connectedCallback() {
     this.mount(`<details open><summary>媒体库整理 · 全局设置</summary><div class="body">
-      <p>下载根目录、媒体库根目录、版本后缀和 Jellyfin 连接在插件配置中统一设置。</p>
+      <p>下载根目录、媒体库根目录、版本后缀和 Jellyfin 连接在插件配置中统一设置。优先硬链，不支持时依次尝试 Reflink、普通复制（占用额外空间）。</p>
       <p class="muted">每部番的 TMDB 绑定、季集映射和整理预览，请到「番剧详情 → 媒体库」。</p>
       <div class="row"><span id="state" class="badge"></span><button id="activate">接管整理</button></div>
       <label><input id="automatic" type="checkbox">自动整理已绑定的番剧</label>
@@ -95,7 +95,7 @@ class Detail extends Panel {
         <select id="unassigned"></select><div class="row"><button id="assign">关联到本番</button></div>
       </div></details>
       <div class="row"><button id="preview">预览本番整理计划</button><button id="apply" class="primary" disabled>执行此计划</button><button id="verify">核对 Jellyfin 识别</button></div>
-      <div id="plan" class="plan"></div><div id="message" role="status"></div>`);
+      <div id="plan" class="plan"></div><details id="result-panel" hidden><summary>上次整理明细</summary><div id="results" class="body plan"></div></details><div id="message" role="status"></div>`);
     for(const id of ['type','query','tmdb','season','offset'])this.$(id).oninput=()=>{this.dirty=true;this.invalidate();};
     this.action('search',async()=>{
       const rows=await this.host.api.get(`search?query=${encodeURIComponent(this.$('query').value)}&kind=${this.$('type').value}`);
@@ -132,14 +132,14 @@ class Detail extends Panel {
       this.token=p.linkable?p.token:null;
       this.$('plan').replaceChildren(...p.items.map(i=>{
         const el=document.createElement('div');el.className='item';el.style.whiteSpace='pre-wrap';
-        el.textContent=`${i.name}\n→ ${i.target||i.reason}${i.old_targets?.length?'\n旧链接：'+i.old_targets.join(', ')+'（验证新链接后，仅清理本插件管理的链接）':''}`;return el;
+        el.textContent=`${i.name}\n→ ${i.target||i.reason}${i.old_targets?.length?'\n旧路径：'+i.old_targets.join(', ')+'（验证新文件后，仅清理本插件管理的文件）':''}`;return el;
       }));
-      this.message(`仅当前番：${p.linkable} 个可建立链接，${p.held} 个待确认。`);
+      this.message(`仅当前番：${p.linkable} 个可整理，${p.held} 个待确认。`);
     });
     this.action('apply',async()=>{
       const token=this.token;this.invalidate();
       const r=await this.host.api.post(`rules/${this.rid}/apply`,{token});
-      this.message(summary(r.results)+'\n'+r.jellyfin+'\n'+r.results.filter(x=>x.state==='failed').map(x=>x.detail).join('\n'));
+      this.renderResults(r.results);this.message(summary(r.results)+'\n'+r.jellyfin+'\n'+r.results.filter(x=>x.state==='failed').map(x=>x.detail).join('\n'));
     });
     this.action('verify',async()=>{
       const rows=await this.host.api.post(`rules/${this.rid}/jellyfin/verify`,{});
@@ -151,10 +151,18 @@ class Detail extends Panel {
   invalidate() {this.token=null;if(this.$('apply'))this.$('apply').disabled=true;}
   async loadRule() {
     const data=await this.host.api.get(`rules/${this.rid}/library`);this.mapping=data.mapping;
+    this.renderResults(data.results||[]);
     const m=data.mapping||data.rule;
     this.$('type').value=m.media_type||'tv';this.$('query').value=data.rule.title;
     this.$('tmdb').value=m.tmdb_id||'';this.$('season').value=m.season??1;this.$('offset').value=m.episode_offset??0;
     this.$('state').textContent=!data.active?'预览模式 · 请到全局设置接管整理':data.automatic?'自动整理已开启 · 下载完成后会使用本番映射':'自动整理已关闭 · 可以手动整理本番';
+  }
+  renderResults(rows) {
+    this.$('result-panel').hidden=!rows.length;
+    this.$('results').replaceChildren(...rows.map(r=>{
+      const el=document.createElement('div');el.className='item';
+      el.textContent=`${r.name||r.key} · ${r.detail||stateNames[r.state]||r.state}`;return el;
+    }));
   }
   async scan() {
     const selected=this.$('task').value;

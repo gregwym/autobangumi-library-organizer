@@ -1,12 +1,11 @@
 import asyncio
-import errno
 import hashlib
 import json
-import os
 import secrets
 
 from .models import Mapping
 from .planner import build, contained, fingerprint
+from .transfer import publish
 
 
 def digest(value):
@@ -26,6 +25,16 @@ class Engine:
 
     def settings_digest(self):
         return digest(self.options.model_dump(exclude={"jellyfin_api_key"}))
+
+    def ownership(self, item, target):
+        return next((r for r in self.store.owned(item["key"]) if r["target"] == str(target)), None)
+
+    def valid_owned(self, item, target, ownership):
+        return bool(
+            ownership
+            and json.loads(ownership["source_fingerprint"]) == item["fingerprint"]
+            and json.loads(ownership["fingerprint"]) == fingerprint(target)
+        )
 
     async def preview(self, rule_id=None):
         async with self.lock:
@@ -75,7 +84,11 @@ class Engine:
                 if i["target"]:
                     try:
                         target = contained(self.options.library_root, i["target"])
-                        if target.exists() and fingerprint(target) != i["fingerprint"]:
+                        if (
+                            target.exists()
+                            and fingerprint(target) != i["fingerprint"]
+                            and not self.valid_owned(i, target, self.ownership(i, target))
+                        ):
                             i["reason"] = "目标已存在且不是同一源文件"
                             i["target"] = None
                     except ValueError as e:
@@ -106,27 +119,28 @@ class Engine:
             dst = contained(self.options.library_root, item["target"])
             if fingerprint(src) != item["fingerprint"]:
                 raise ValueError("源文件已变化，请重新预览")
-            ownership = next(
-                (r for r in self.store.owned(item["key"]) if r["target"] == str(dst)), None
-            )
-            owned = bool(ownership and json.loads(ownership["fingerprint"]) == item["fingerprint"])
+            ownership = self.ownership(item, dst)
+            method = ownership["method"] if ownership else None
             if dst.exists():
-                if fingerprint(dst) != item["fingerprint"]:
-                    raise ValueError("目标已存在，未覆盖")
-                if not owned:
+                if not self.valid_owned(item, dst, ownership):
+                    if fingerprint(dst) != item["fingerprint"]:
+                        raise ValueError("目标已存在，未覆盖")
                     return {
                         "key": item["key"],
                         "state": "exists",
+                        "method": "hardlink",
                         "detail": "已有同源硬链，未接管其所有权",
                     }
             else:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst = contained(self.options.library_root, dst)
-                self.store.claim(item)  # durable intent before filesystem mutation
                 self.store.record(item, "linking")
-                os.link(src, dst, follow_symlinks=False)
-                if fingerprint(dst) != item["fingerprint"]:
-                    raise ValueError("硬链校验失败")
+                method = publish(
+                    src,
+                    dst,
+                    item["fingerprint"],
+                    lambda fp, mode: self.store.claim(item, fp, mode),
+                )
             detail = ""
             # Only remove links explicitly owned by this plugin, after new link verified.
             for old in item.get("old_targets", []):
@@ -142,16 +156,13 @@ class Engine:
                         continue
                     old_path.unlink()
                 self.store.forget(old)
+            label = {"hardlink": "硬链", "reflink": "Reflink", "copy": "普通复制"}[method]
+            detail = label + ("；" + detail if detail else "")
             self.store.record(item, "linked", detail)
-            return {"key": item["key"], "state": "linked", "detail": detail}
+            return {"key": item["key"], "state": "linked", "method": method, "detail": detail}
         except (OSError, ValueError) as e:
-            reason = (
-                "下载与媒体库不支持硬链（跨文件系统）；未复制文件"
-                if isinstance(e, OSError) and e.errno == errno.EXDEV
-                else str(e)
-            )
             # Preserve any existing ownership record; failed plans can be retried safely.
-            return {"key": item["key"], "state": "failed", "detail": reason}
+            return {"key": item["key"], "state": "failed", "detail": str(e)}
 
     async def apply(self, token, rule_id=None):
         async with self.replay_lock, self.lock:
@@ -175,7 +186,18 @@ class Engine:
                 if plan["mappings"].get(task["key"]) != self.store.binding(task):
                     raise ValueError("TMDB 映射已变化，请重新预览")
             backup = str(self.store.backup())
-            results = [self.link(i) for i in plan["items"]]
+            # Large copies must not block AB's HTTP/event loop. Retain the lock
+            # until the worker stops even if a client disconnects/cancels.
+            worker = asyncio.create_task(
+                asyncio.to_thread(lambda: [self.link(i) for i in plan["items"]])
+            )
+            try:
+                results = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                await worker
+                raise
+            for item, result in zip(plan["items"], results, strict=True):
+                result.update(name=item["name"], target=item["target"])
             self.store.set("last_results", results)
             retained = [
                 i

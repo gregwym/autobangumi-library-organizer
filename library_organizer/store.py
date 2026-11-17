@@ -19,6 +19,7 @@ class Store:
               CREATE TABLE IF NOT EXISTS bindings(key TEXT PRIMARY KEY,payload TEXT NOT NULL);
               CREATE TABLE IF NOT EXISTS files(key TEXT PRIMARY KEY,source TEXT,target TEXT,fingerprint TEXT,state TEXT,detail TEXT,updated REAL);
               CREATE TABLE IF NOT EXISTS owned(target TEXT PRIMARY KEY,key TEXT,fingerprint TEXT);
+              CREATE TABLE IF NOT EXISTS transfers(target TEXT PRIMARY KEY,source_fingerprint TEXT,method TEXT);
               CREATE TABLE IF NOT EXISTS plans(token TEXT PRIMARY KEY,payload TEXT NOT NULL,created REAL,used INTEGER DEFAULT 0);
             """)
 
@@ -107,23 +108,33 @@ class Store:
 
     def owned(self, key=None):
         with self.db() as c:
-            rows = (
-                c.execute("SELECT * FROM owned WHERE key=?", (key,))
-                if key
-                else c.execute("SELECT * FROM owned")
+            query = (
+                "SELECT o.*, COALESCE(t.source_fingerprint,o.fingerprint) source_fingerprint, "
+                "COALESCE(t.method,'hardlink') method FROM owned o "
+                "LEFT JOIN transfers t ON o.target=t.target"
             )
+            rows = c.execute(query + " WHERE o.key=?", (key,)) if key else c.execute(query)
             return [dict(r) for r in rows]
 
-    def claim(self, item):
+    def claim(self, item, target_fingerprint=None, method="hardlink"):
         with self.db() as c:
             c.execute(
-                "INSERT OR IGNORE INTO owned VALUES (?,?,?)",
-                (item["target"], item["key"], json.dumps(item["fingerprint"])),
+                "INSERT OR REPLACE INTO owned VALUES (?,?,?)",
+                (
+                    item["target"],
+                    item["key"],
+                    json.dumps(target_fingerprint or item["fingerprint"]),
+                ),
+            )
+            c.execute(
+                "INSERT OR REPLACE INTO transfers VALUES (?,?,?)",
+                (item["target"], json.dumps(item["fingerprint"]), method),
             )
 
     def forget(self, target):
         with self.db() as c:
             c.execute("DELETE FROM owned WHERE target=?", (target,))
+            c.execute("DELETE FROM transfers WHERE target=?", (target,))
 
     def unbind(self, key):
         with self.db() as c:

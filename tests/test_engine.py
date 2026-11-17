@@ -131,17 +131,152 @@ async def test_changed_source_no_link(env):
     assert not Path(p["items"][0]["target"]).exists()
 
 
-async def test_cross_device_no_copy_fallback(env, monkeypatch):
+def cross_device(monkeypatch, source, method):
+    import shutil
+
+    from library_organizer import transfer
+
+    real_link = os.link
+
+    def link(src, dst, **kw):
+        if Path(src) == source:
+            raise OSError(errno.EXDEV, "different mounts")
+        return real_link(src, dst, **kw)
+
+    def clone(src, dst):
+        if method == "copy":
+            Path(dst).write_bytes(b"partial clone")
+            raise OSError(errno.EOPNOTSUPP, "clone unsupported")
+        shutil.copyfile(src, dst)  # simulate successful ioctl on non-Linux test hosts
+
+    monkeypatch.setattr(os, "link", link)
+    monkeypatch.setattr(transfer, "reflink", clone)
+
+
+@pytest.mark.parametrize("method", ["reflink", "copy"])
+async def test_fallback_idempotence_restart_and_mapping_change(env, monkeypatch, method):
     e, t, s = env
+    cross_device(monkeypatch, s, method)
     p = await e.preview()
-
-    def fail(*a, **kw):
-        raise OSError(errno.EXDEV, "different mounts")
-
-    monkeypatch.setattr(os, "link", fail)
+    old = Path(p["items"][0]["target"])
     r = await e.apply(p["token"])
-    assert "跨文件系统" in r["results"][0]["detail"]
+    assert r["results"][0]["method"] == method
+    assert old.read_bytes() == s.read_bytes()
+    assert not os.path.samefile(old, s)
+    original_fp = fingerprint(old)
+    e = Engine(Store(e.store.path), e.bridge, e.options)
+    p = await e.preview()
+    assert p["held"] == 0
+    r = await e.apply(p["token"])
+    assert r["results"][0]["method"] == method
+    assert fingerprint(old) == original_fp
+    e.store.bind(t["key"], {"tmdb_id": 1, "season": 2})
+    p = await e.preview()
+    await e.apply(p["token"])
+    assert not old.exists()
+    assert Path(p["items"][0]["target"]).read_bytes() == s.read_bytes()
+
+
+@pytest.mark.parametrize("error", [errno.ENOSPC, errno.EACCES, errno.EIO])
+async def test_reflink_real_failure_does_not_copy(env, monkeypatch, error):
+    from library_organizer import transfer
+
+    e, t, s = env
+    cross_device(monkeypatch, s, "reflink")
+
+    def fail(src, dst):
+        Path(dst).write_bytes(b"partial")
+        raise OSError(error, "disk or permission failure")
+
+    monkeypatch.setattr(transfer, "reflink", fail)
+    monkeypatch.setattr(
+        transfer.shutil, "copyfileobj", lambda *a, **kw: pytest.fail("must not copy")
+    )
+    p = await e.preview()
+    r = await e.apply(p["token"])
+    dst = Path(p["items"][0]["target"])
+    assert r["results"][0]["state"] == "failed"
+    assert not dst.exists()
+    assert not list(dst.parent.glob(".ab-organizer-*"))
+
+
+async def test_copy_disk_full_removes_partial_file(env, monkeypatch):
+    from library_organizer import transfer
+
+    e, t, s = env
+    cross_device(monkeypatch, s, "copy")
+
+    def fail(source, target, **kw):
+        target.write(b"partial")
+        raise OSError(errno.ENOSPC, "full")
+
+    monkeypatch.setattr(transfer.shutil, "copyfileobj", fail)
+    p = await e.preview()
+    r = await e.apply(p["token"])
+    dst = Path(p["items"][0]["target"])
+    assert r["results"][0]["state"] == "failed"
+    assert not dst.exists()
+    assert not list(dst.parent.glob(".ab-organizer-*"))
+
+
+async def test_target_created_during_copy_never_overwritten(env, monkeypatch):
+    e, t, s = env
+    cross_device(monkeypatch, s, "copy")
+    p = await e.preview()
+    dst = Path(p["items"][0]["target"])
+    claim = e.store.claim
+
+    def race(*a, **kw):
+        claim(*a, **kw)
+        dst.write_bytes(b"another writer")
+
+    monkeypatch.setattr(e.store, "claim", race)
+    r = await e.apply(p["token"])
+    assert r["results"][0]["state"] == "failed"
+    assert dst.read_bytes() == b"another writer"
+    p = await e.preview()
+    assert p["held"] == 1
+
+
+async def test_copy_modified_source_is_not_published(env, monkeypatch):
+    from library_organizer import transfer
+
+    e, t, s = env
+    cross_device(monkeypatch, s, "copy")
+    original = transfer.shutil.copyfileobj
+
+    def changing(source, target, **kw):
+        original(source, target, **kw)
+        s.write_bytes(b"changed")
+
+    monkeypatch.setattr(transfer.shutil, "copyfileobj", changing)
+    p = await e.preview()
+    r = await e.apply(p["token"])
+    assert r["results"][0]["state"] == "failed"
     assert not Path(p["items"][0]["target"]).exists()
+
+
+async def test_restart_recovers_published_copy_intent(env, monkeypatch):
+    e, t, s = env
+    cross_device(monkeypatch, s, "copy")
+    p = await e.preview()
+    real_record = e.store.record
+
+    def fail_after_publish(item, state, detail=""):
+        if state == "linked":
+            raise RuntimeError("simulate process death")
+        real_record(item, state, detail)
+
+    monkeypatch.setattr(e.store, "record", fail_after_publish)
+    with pytest.raises(RuntimeError):
+        await e.apply(p["token"])
+    dst = Path(p["items"][0]["target"])
+    fp = fingerprint(dst)
+    e = Engine(Store(e.store.path), e.bridge, e.options)
+    p = await e.preview()
+    r = await e.apply(p["token"])
+    assert r["results"][0]["method"] == "copy"
+    assert fingerprint(dst) == fp
 
 
 async def test_native_pipeline_blocks_execution(env):
