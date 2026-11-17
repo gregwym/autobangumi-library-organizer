@@ -116,6 +116,16 @@ async def scoped(tmp_path, monkeypatch):
     )
 
 
+async def test_single_entry_picker_does_not_inspect_other_or_unknown_files(scoped):
+    x = scoped
+    x.add("c", "Unknown", 1)
+    tasks = await x.bridge.scan(rule_id=x.a.id, discover_unassigned=True)
+    assert x.queried == ["a" * 40]
+    assert {t["rule_id"] for t in tasks} == {x.a.id, None}
+    assert next(t for t in tasks if t["rule_id"] is None)["files"] == []
+    assert [t["rule_id"] for t in x.store.tasks()] == [x.a.id]
+
+
 async def test_entry_isolation_and_shared_library_identity(scoped):
     x = scoped
     e = x.engine

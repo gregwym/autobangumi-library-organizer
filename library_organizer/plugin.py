@@ -65,9 +65,9 @@ class LibraryOrganizer(Plugin[Options]):
         async def progress(rule_id: int | None = None):
             return self.engine.progress(rule_id)
 
-        async def scan_tasks():
+        async def scan_tasks(**kwargs):
             try:
-                return await self.bridge.scan()
+                return await self.bridge.scan(**kwargs)
             except ValueError as e:
                 raise HTTPException(422, str(e)) from e
 
@@ -141,7 +141,7 @@ class LibraryOrganizer(Plugin[Options]):
         async def rule_scan(rid: int):
             await require_rule(rid)
             async with self.engine.lock:
-                tasks = await scan_tasks()
+                tasks = await scan_tasks(rule_id=rid, discover_unassigned=True)
                 return {
                     "tasks": [task_view(t) for t in tasks if t["rule_id"] == rid],
                     "unassigned": [task_view(t) for t in tasks if t["rule_id"] is None],

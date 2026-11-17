@@ -43,11 +43,23 @@ class Store:
             c.execute("INSERT OR REPLACE INTO kv VALUES (?,?)", (key, json.dumps(value)))
 
     def save_task(self, task):
+        self.save_tasks([task])
+
+    def save_tasks(self, tasks):
         with self.db() as c:
-            c.execute(
+            c.executemany(
                 "INSERT INTO tasks VALUES (?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload WHERE tasks.payload IS NOT excluded.payload",
-                (task["key"], json.dumps(task)),
+                [(task["key"], json.dumps(task)) for task in tasks],
             )
+
+    def scan_state(self):
+        with self.db() as c:
+            assignments = {
+                r["key"].removeprefix("assignment:"): json.loads(r["value"])
+                for r in c.execute("SELECT * FROM kv WHERE key LIKE 'assignment:%'")
+            }
+            bindings = {r["key"] for r in c.execute("SELECT key FROM bindings")}
+        return assignments, bindings
 
     def tasks(self):
         with self.db() as c:

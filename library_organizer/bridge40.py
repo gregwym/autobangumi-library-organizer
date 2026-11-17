@@ -111,7 +111,9 @@ class Bridge40:
         associations = await self.associations()
         await asyncio.to_thread(self.store.reconcile_history, associations)
 
-    async def scan(self, rule_id=None, bound_only=False):
+    async def scan(self, rule_id=None, bound_only=False, discover_unassigned=False):
+        import asyncio
+
         if not Path(self.options.source_root).is_dir():
             raise ValueError("下载根目录不存在或尚未挂载，请先检查插件路径配置")
         from module.downloader import DownloadClient
@@ -119,7 +121,9 @@ class Bridge40:
 
         associations = await self.associations()
         rules = list(associations.rules.values())
+        assignments, bindings = await asyncio.to_thread(self.store.scan_state)
         tasks = []
+        saved = []
         for instance in downloader_ids():
             async with DownloadClient(instance) as client:
                 infos = await client.get_torrent_info(
@@ -134,17 +138,22 @@ class Bridge40:
                         continue
                     key = task_key(instance, str(info["hash"]))
                     rid, association = associations.resolve(
-                        instance, str(info["hash"]), self.store.get("assignment:" + key)
+                        instance, str(info["hash"]), assignments.get(key)
                     )
                     if rule_id is not None and rid != rule_id:
-                        continue
+                        if not (discover_unassigned and rid is None):
+                            continue
                     matched_rule = next((r for r in rules if r.id == rid), None)
                     if bound_only and (
-                        rid is None or not self.store.binding({"key": key, "rule_id": rid})
+                        rid is None or key not in bindings and f"rule:{rid}" not in bindings
                     ):
                         continue
                     files = []
-                    for f in await client.get_torrent_files(info["hash"]):
+                    # Unknown tasks are offered by identity only in a single-entry UI.
+                    # Do not inspect another entry's files just to populate a selector.
+                    inspect_files = rule_id is None or rid == rule_id
+                    listing = await client.get_torrent_files(info["hash"]) if inspect_files else []
+                    for f in listing:
                         try:
                             src = contained(self.options.source_root, base / f["name"])
                             fp = (
@@ -183,7 +192,9 @@ class Bridge40:
                         "files": files,
                     }
                     tasks.append(task)
-                    self.store.save_task(task)
+                    if inspect_files:
+                        saved.append(task)
+        await asyncio.to_thread(self.store.save_tasks, saved)
         return tasks
 
     async def tmdb(self, path, params=None):
