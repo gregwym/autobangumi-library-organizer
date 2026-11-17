@@ -92,3 +92,22 @@ async def test_rule_binding_rejects_file_specific_overrides(api):
             "/rules/1/binding", json={"tmdb_id": 8, "episodes": {"one.mkv": 1}}
         )
         assert response.status_code == 422
+
+
+async def test_rule_offsets_follow_ab_and_ignore_duplicate_input(api):
+    obj, task, client = api
+    async with client:
+        r = await client.post(
+            "/rules/1/binding", json={"tmdb_id": 8, "season": 99, "episode_offset": 500}
+        )
+        assert r.status_code == 200
+        mapping = obj.store.direct_binding("rule:1")
+        assert mapping["season"] == 2 and mapping["episode_offset"] == 0
+        obj.bridge.rule.return_value.update(season=3, episode_offset=-12)
+        data = (await client.get("/rules/1/library")).json()
+        assert data["mapping"]["season"] == 3
+        assert data["mapping"]["episode_offset"] == -12
+        task["rule_mapping"] = {"season": 3, "episode_offset": -12}
+        assert obj.store.binding(task)["episode_offset"] == -12
+        obj.store.bind(task["key"], {"tmdb_id": 8, "season": 0, "episode_offset": 0})
+        assert obj.store.binding(task)["season"] == 0

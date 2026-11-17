@@ -198,3 +198,39 @@ def test_same_group_versions_are_held_without_hash_names(tmp_path):
     )
     p = build(task, Mapping(tmdb_id=1), {"title": "Show", "episodes": [1]}, opts)
     assert all(not x["target"] and "同一目标" in x["reason"] for x in p)
+
+
+def test_renamed_single_episode_uses_release_number_once(tmp_path):
+    task, opts = fixture(tmp_path, ["Show S02E01.mkv", "Show - 26.chs.ass"])
+    task["name"] = "[Group] Show - 26 [1080p]"
+    p = build(
+        task,
+        Mapping(tmdb_id=1, season=2, episode_offset=-25),
+        {"title": "Show", "episodes": [1]},
+        opts,
+    )
+    assert "S02E01" in p[0]["target"]
+    assert "S02E01" in p[1]["target"]
+
+
+def test_unknown_legacy_offset_is_held_instead_of_added_twice(tmp_path):
+    task, opts = fixture(tmp_path, ["Show S02E01.mkv", "Show S02E02.mkv"])
+    p = build(
+        task,
+        Mapping(tmdb_id=1, season=2, episode_offset=25),
+        {"title": "Show", "episodes": [26, 27]},
+        opts,
+    )
+    assert all(not x["target"] and "已应用" in x["reason"] for x in p)
+    p = build(
+        task,
+        Mapping(
+            tmdb_id=1,
+            season=2,
+            episode_offset=25,
+            episodes={"Show S02E01.mkv": 26, "Show S02E02.mkv": 27},
+        ),
+        {"title": "Show", "episodes": [26, 27]},
+        opts,
+    )
+    assert all(x["target"] for x in p)

@@ -62,7 +62,10 @@ class Store:
             for key in keys:
                 r = c.execute("SELECT payload FROM bindings WHERE key=?", (key,)).fetchone()
                 if r:
-                    return json.loads(r[0])
+                    value = json.loads(r[0])
+                    if key.startswith("rule:") and value.get("follow_ab", True):
+                        value.update(task.get("rule_mapping", {}))
+                    return value
         return None
 
     def record(self, item, state, detail=""):

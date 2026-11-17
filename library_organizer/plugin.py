@@ -105,9 +105,14 @@ class LibraryOrganizer(Plugin[Options]):
         @router.get("/rules/{rid}/library")
         async def rule_library(rid: int):
             rule = await require_rule(rid)
+            mapping = self.store.direct_binding(f"rule:{rid}")
+            if mapping and mapping.get("follow_ab", True):
+                mapping.update(
+                    season=rule["season"], episode_offset=rule["episode_offset"], follow_ab=True
+                )
             return {
                 "rule": rule,
-                "mapping": self.store.direct_binding(f"rule:{rid}"),
+                "mapping": mapping,
                 "active": self.store.get("active", False),
                 "automatic": self.store.get("automatic", False),
                 "results": self.store.get(f"last_results:rule:{rid}", []),
@@ -125,15 +130,18 @@ class LibraryOrganizer(Plugin[Options]):
 
         @router.post("/rules/{rid}/binding")
         async def rule_binding(rid: int, body: Mapping):
-            await require_rule(rid)
+            rule = await require_rule(rid)
             if body.episodes or body.main_file:
                 raise HTTPException(422, "逐文件设置请保存在对应下载任务中")
             async with self.engine.lock:
+                body = body.model_copy(
+                    update={"season": rule["season"], "episode_offset": rule["episode_offset"]}
+                )
                 try:
                     await self.bridge.metadata(body)
                 except ValueError as e:
                     raise HTTPException(422, str(e)) from e
-                self.store.bind(f"rule:{rid}", body.model_dump())
+                self.store.bind(f"rule:{rid}", {**body.model_dump(), "follow_ab": True})
             return {"saved": True}
 
         @router.post("/rules/{rid}/assign")

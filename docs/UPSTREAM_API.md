@@ -63,7 +63,7 @@ RSS、搜索、手动、补集、重试必须经过同一个 `download.preflight
 
 `metadata.search(type,query)`、`metadata.get(type,id)`、`metadata.episodes(tv_id,season)` 通过宿主凭据/代理/缓存服务调用。必须保留 movie/tv 类型，不以 title 相似度代替媒体身份。搜索歧义由用户确认。
 
-映射记录：source release / file id → TMDB type/id/season/episode(s)，带映射来源、revision、人工锁定状态。规则级映射与逐文件 override 分开；后者不能意外应用到后续不同文件。
+映射记录：source release / file id → TMDB type/id/season/episode(s)，带映射来源、revision、人工锁定状态。AB 原有季度、季偏移、集数偏移是默认季集来源，插件应实时继承，不另建同级配置。旧文件已应用偏移的情况须有原始发布集号或明确映射证明，不能再加一次。规则级映射与逐文件 override 分开；后者不能意外应用到后续不同文件。
 
 ### 文件级计划与执行账本
 

@@ -47,6 +47,11 @@ def contained(root, path):
 def episode(name):
     # No unadorned trailing number: "Hibike! Euphonium 3" is not episode 3.
     stem = Path(name).stem
+    stem = re.sub(
+        r"(?i)(?:\.(?:chs|cht|zh-hans|zh-hant|zh-cn|zh-tw|jpn|eng|ja|en|forced|default))+$",
+        "",
+        stem,
+    )
     if re.search(r"(?i)(?:E\d{1,4}(?:[ -]*E|[-~])\d{1,4}|[\[ ]\d{1,4}\s*[-~]\s*\d{1,4})", stem):
         return None
     for pattern in [
@@ -99,6 +104,8 @@ def build(task, mapping, metadata, options):
     videos = {}
     media = [f for f in task["files"] if classify(f["name"]) == "episode"]
     main = mapping.main_file
+    release_episode = episode(task["name"]) if len(media) == 1 else None
+    source_episodes = {}
     if mapping.media_type == "movie" and not main and len(media) == 1:
         main = media[0]["name"]
     for f in task["files"]:
@@ -146,11 +153,27 @@ def build(task, mapping, metadata, options):
             else:
                 ep = mapping.episodes.get(name)
                 if ep is None:
-                    ep = episode(name)
+                    ep = (
+                        release_episode
+                        if release_episode is not None and kind == "episode"
+                        else episode(name)
+                    )
+                    source_episodes[name] = ep
+                    if (
+                        ep is not None
+                        and mapping.episode_offset
+                        and release_episode is None
+                        and re.search(r"(?i)S\d{1,3}E\d{1,4}", Path(name).stem)
+                    ):
+                        item["reason"] = "无法确认旧文件是否已应用集数偏移，请逐文件确认目标集号"
+                        ep = None
                     if ep is not None:
-                        ep += mapping.episode_offset
+                        adjusted = ep + mapping.episode_offset
+                        # Same zero/non-positive safeguards as AB's native renamer.
+                        if ep != 0 and adjusted > 0:
+                            ep = adjusted
                 if ep is None or ep not in metadata["episodes"]:
-                    item["reason"] = "无法对应 TMDB 集数，请在文件映射中确认"
+                    item["reason"] = item["reason"] or "无法对应 TMDB 集数，请在文件映射中确认"
                 else:
                     target = (
                         folder
@@ -193,7 +216,9 @@ def build(task, mapping, metadata, options):
         ]
         if not candidates:
             ep = episode(name)
-            candidates = [n for n in videos if ep is not None and episode(n) == ep]
+            candidates = [
+                n for n in videos if ep is not None and ep in {episode(n), source_episodes.get(n)}
+            ]
         if len(candidates) != 1:
             item["reason"] = "字幕无法唯一对应视频"
             continue

@@ -139,6 +139,7 @@ class Bridge40:
                         rid = assigned if any(r.id == assigned for r in rules) else None
                     if rule_id is not None and rid != rule_id:
                         continue
+                    matched_rule = next((r for r in rules if r.id == rid), None)
                     files = []
                     for f in await client.get_torrent_files(info["hash"]):
                         try:
@@ -166,6 +167,12 @@ class Bridge40:
                         "task_id": info["hash"],
                         "name": info["name"],
                         "rule_id": rid,
+                        "rule_mapping": {
+                            "season": max(0, matched_rule.season + matched_rule.season_offset),
+                            "episode_offset": matched_rule.episode_offset,
+                        }
+                        if matched_rule
+                        else {},
                         "suggested_title": next(
                             (r.official_title for r in rules if r.id == rid), info["name"]
                         ),
