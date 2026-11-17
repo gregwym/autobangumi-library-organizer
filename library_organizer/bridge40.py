@@ -221,13 +221,15 @@ class Bridge40:
     async def refresh_jellyfin(self):
         import httpx
 
+        from .jellyfin import auth_headers
+
         if not self.options.jellyfin_url or not self.options.jellyfin_api_key:
             return "未配置"
         try:
             async with httpx.AsyncClient(timeout=30) as client:
                 r = await client.post(
                     self.options.jellyfin_url.rstrip("/") + "/Library/Refresh",
-                    headers={"X-Emby-Token": self.options.jellyfin_api_key},
+                    headers=auth_headers(self.options.jellyfin_api_key),
                 )
                 r.raise_for_status()
             return "已请求扫描（不代表识别验证完成）"

@@ -103,3 +103,7 @@ RSS、搜索、手动、补集、重试必须经过同一个 `download.preflight
 ## Provider ID 作用域
 
 AB 4.0 的 `scheduled_task` ID 是全局唯一，两个插件都使用 `check-update` 会导致后加载插件整体失败。当前整理插件使用 `library-organizer-` 前缀规避；建议宿主让 scheduled_task 与 API_ROUTER 一样按插件隔离，在调度器使用 `<plugin_id>/<provider_id>` 作为稳定标识，并覆盖插件共存与热更新测试。
+
+## Jellyfin 刷新认证兼容性
+
+AB 内置 media-server-refresh 使用旧 `X-Emby-Token`。Jellyfin 12 默认禁用旧认证，现有有效 API Key 也会返回 401；当前整理插件刷新与核对统一使用 `Authorization: MediaBrowser Token="..."`。后续上游 PR 应同步修正内置刷新插件并增加拒绝旧认证头的回归测试，不要求用户重新生成密钥或开启旧认证。参考 [Jellyfin 12 发布说明](https://jellyfin.org/posts/jellyfin-release-12.0/)。

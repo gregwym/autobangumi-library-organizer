@@ -1,6 +1,36 @@
 from library_organizer.jellyfin import compare
 
 
+async def test_refresh_and_verify_use_current_jellyfin_authorization(monkeypatch):
+    import httpx
+
+    from library_organizer.bridge40 import Bridge40
+    from library_organizer.jellyfin import verify
+    from library_organizer.models import Options
+
+    paths = []
+
+    def server(request):
+        paths.append(request.url.path)
+        if request.headers.get("Authorization") != 'MediaBrowser Token="test-key"':
+            return httpx.Response(401)
+        assert "X-Emby-Token" not in request.headers
+        if request.method == "POST":
+            return httpx.Response(204)
+        return httpx.Response(200, json={"Items": [], "TotalRecordCount": 0})
+
+    client = httpx.AsyncClient
+    monkeypatch.setattr(
+        httpx,
+        "AsyncClient",
+        lambda **kwargs: client(transport=httpx.MockTransport(server), **kwargs),
+    )
+    options = Options(jellyfin_url="http://jellyfin.test", jellyfin_api_key="test-key")
+    assert "已请求扫描" in await Bridge40(options, None).refresh_jellyfin()
+    assert await verify(options, []) == []
+    assert paths == ["/Library/Refresh", "/Items"]
+
+
 def test_verify_episode_identity_and_alternate_version_path():
     planned = [
         {

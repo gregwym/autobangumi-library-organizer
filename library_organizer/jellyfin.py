@@ -1,6 +1,11 @@
 """Read-only post-scan verification; never equates refresh acceptance with recognition."""
 
+import json
 from pathlib import Path
+
+
+def auth_headers(key):
+    return {"Authorization": "MediaBrowser Token=" + json.dumps(key)}
 
 
 def compare(planned, items, local_root, remote_root):
@@ -55,7 +60,7 @@ async def verify(options, planned):
         raise ValueError("请先配置 Jellyfin 地址与 API Key")
     items = []
     async with httpx.AsyncClient(
-        timeout=30, headers={"X-Emby-Token": options.jellyfin_api_key}
+        timeout=30, headers=auth_headers(options.jellyfin_api_key)
     ) as client:
         for start in range(0, 100000, 500):
             r = await client.get(
