@@ -1,6 +1,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import secrets
 
 from .models import Mapping
@@ -24,7 +25,9 @@ class Engine:
         return self.store
 
     def settings_digest(self):
-        return digest(self.options.model_dump(exclude={"jellyfin_api_key"}))
+        return digest(
+            {"layout": 2, "options": self.options.model_dump(exclude={"jellyfin_api_key"})}
+        )
 
     def ownership(self, item, target):
         return next((r for r in self.store.owned(item["key"]) if r["target"] == str(target)), None)
@@ -38,7 +41,7 @@ class Engine:
 
     async def preview(self, rule_id=None):
         async with self.lock:
-            tasks = await self.bridge.scan()
+            tasks = await self.bridge.scan(rule_id=rule_id)
             if rule_id is not None:
                 tasks = [t for t in tasks if t.get("rule_id") == rule_id]
             items = []
@@ -135,12 +138,25 @@ class Engine:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst = contained(self.options.library_root, dst)
                 self.store.record(item, "linking")
-                method = publish(
-                    src,
-                    dst,
-                    item["fingerprint"],
-                    lambda fp, mode: self.store.claim(item, fp, mode),
-                )
+                # A naming/mapping edit can reuse our verified existing replica
+                # on the library filesystem, instead of copying the video again.
+                for old in item.get("old_targets", []):
+                    old_path = contained(self.options.library_root, old)
+                    prior = self.ownership(item, old_path)
+                    if old_path.exists() and self.valid_owned(item, old_path, prior):
+                        method = prior["method"]
+                        self.store.claim(item, fingerprint(old_path), method)
+                        os.link(old_path, dst, follow_symlinks=False)
+                        break
+                else:
+                    method = publish(
+                        src,
+                        dst,
+                        item["fingerprint"],
+                        lambda fp, mode: self.store.claim(item, fp, mode),
+                    )
+                if not self.valid_owned(item, dst, self.ownership(item, dst)):
+                    raise ValueError("目标文件校验失败")
             detail = ""
             # Only remove links explicitly owned by this plugin, after new link verified.
             for old in item.get("old_targets", []):
@@ -174,7 +190,7 @@ class Engine:
             plan = self.store.take_plan(token)
             if plan.get("rule_id") != rule_id:
                 raise ValueError("预览不属于当前番剧，请重新预览")
-            tasks = await self.bridge.scan()
+            tasks = await self.bridge.scan(rule_id=rule_id)
             if rule_id is not None:
                 tasks = [t for t in tasks if t.get("rule_id") == rule_id]
             if (

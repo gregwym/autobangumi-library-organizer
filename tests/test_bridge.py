@@ -73,6 +73,12 @@ async def test_scan_uses_only_read_apis_and_ignores_tags(tmp_path, monkeypatch):
     assert tasks[0]["files"][0]["fingerprint"]
     assert "tags" not in tasks[0]
 
+    async def unexpected(self, task):
+        pytest.fail("Other rules must not fetch file lists")
+
+    monkeypatch.setattr(Client, "get_torrent_files", unexpected)
+    assert await bridge.scan(rule_id=rule.id + 1000) == []
+
 
 async def test_native_guard_restores_and_version_gates(tmp_path, monkeypatch):
     from module import conf

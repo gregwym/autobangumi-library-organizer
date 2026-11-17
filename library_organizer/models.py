@@ -1,8 +1,9 @@
 from pathlib import Path
+from string import Formatter
 from typing import Literal
 
 from ab_sdk import secret_field
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class PathMap(BaseModel):
@@ -16,11 +17,40 @@ class Options(BaseModel):
     library_root: str = Field(default="/library", title="媒体库根目录（AB 内路径）")
     path_map: list[PathMap] = Field(default_factory=list, title="下载器路径映射")
     version_suffix: bool = Field(default=True, title="媒体库文件附加版本后缀")
+    episode_template: str = Field(
+        default="{title} S{season:02d}E{episode:02d}{version}",
+        title="剧集文件名模板",
+        max_length=512,
+        description="不含扩展名。可用 title、year、tmdb_id、season、episode、group、version、base；version 自动生成带分隔符的组名后缀。",
+    )
+    movie_template: str = Field(
+        default="{base}{version}",
+        title="电影文件名模板",
+        max_length=512,
+        description="不含扩展名。base 为作品名、年份与 TMDB ID；version 为组名后缀。默认值适合 Jellyfin。",
+    )
     jellyfin_url: str = Field(default="", title="Jellyfin 地址（可选）")
     jellyfin_library_root: str = Field(
         default="", title="Jellyfin 内媒体库根路径（不同容器路径时填写）"
     )
     jellyfin_api_key: str = secret_field(title="Jellyfin API Key（可选）")
+
+    @field_validator("episode_template", "movie_template")
+    @classmethod
+    def filename_template(cls, value):
+        allowed = {"title", "year", "tmdb_id", "season", "episode", "group", "version", "base"}
+        if not value.strip() or any(c in value for c in "/\\\x00\r\n"):
+            raise ValueError("文件名模板不能为空或包含路径分隔符")
+        for _, field, spec, conversion in Formatter().parse(value):
+            if field is None:
+                continue
+            if field not in allowed or conversion:
+                raise ValueError("模板含不支持的字段或转换")
+            if spec and (
+                field not in {"season", "episode", "tmdb_id"} or spec not in {"d", "02d", "03d"}
+            ):
+                raise ValueError("数字字段仅支持 d、02d 或 03d 格式")
+        return value
 
     @model_validator(mode="after")
     def roots(self):

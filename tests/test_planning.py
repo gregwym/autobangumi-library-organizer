@@ -159,3 +159,42 @@ def test_movie_main_override_can_rescue_a_classified_extra(tmp_path):
         opts,
     )
     assert plan[0]["identity"] == {"media_type": "movie", "tmdb_id": 1}
+
+
+def test_jellyfin_default_version_is_group_only(tmp_path):
+    task, opts = fixture(tmp_path, ["[Group] Show - 01v2 [1080p][x265].mkv"])
+    p = build(task, Mapping(tmdb_id=1), {"title": "Show", "episodes": [1]}, opts)
+    assert Path(p[0]["target"]).name == "Show S01E01 - Group.mkv"
+
+
+def test_custom_filename_template_and_matching_subtitle(tmp_path):
+    task, opts = fixture(tmp_path, ["[Group] Show - 01.mkv", "[Group] Show - 01.chs.ass"])
+    opts.episode_template = "{title} ({year}) - S{season:02d}E{episode:02d} [{group}]"
+    p = build(task, Mapping(tmdb_id=1), {"title": "Show", "year": "2024", "episodes": [1]}, opts)
+    assert Path(p[0]["target"]).name == "Show (2024) - S01E01 [Group].mkv"
+    assert Path(p[1]["target"]).name.startswith("Show (2024) - S01E01 [Group].")
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        "../{title}",
+        "{title.__class__}",
+        "{title[0]}",
+        "{episode:999999999d}",
+        "{unknown}",
+        "{",
+        "{title!r}",
+    ],
+)
+def test_filename_template_rejects_unsafe_fields(template):
+    with pytest.raises(ValueError):
+        Options(episode_template=template)
+
+
+def test_same_group_versions_are_held_without_hash_names(tmp_path):
+    task, opts = fixture(
+        tmp_path, ["[Group] Show - 01 [1080p].mkv", "[Group] Show - 01 [720p].mkv"]
+    )
+    p = build(task, Mapping(tmdb_id=1), {"title": "Show", "episodes": [1]}, opts)
+    assert all(not x["target"] and "同一目标" in x["reason"] for x in p)

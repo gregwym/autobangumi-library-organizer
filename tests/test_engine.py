@@ -174,6 +174,7 @@ async def test_fallback_idempotence_restart_and_mapping_change(env, monkeypatch,
     p = await e.preview()
     await e.apply(p["token"])
     assert not old.exists()
+    assert fingerprint(Path(p["items"][0]["target"])) == original_fp
     assert Path(p["items"][0]["target"]).read_bytes() == s.read_bytes()
 
 
@@ -346,6 +347,12 @@ async def test_future_download_automatically_inherits_rule_mapping(env):
     await e.tick()
     new = copy.deepcopy(t)
     new["key"] = "b" * 32
+    next_file = src.with_name("Show - 02.mkv")
+    next_file.write_bytes(b"next episode")
+    new["files"][0].update(
+        name=next_file.name, source=str(next_file), fingerprint=fingerprint(next_file)
+    )
+    e.bridge.metadata.return_value = {"title": "Show", "episodes": [1, 2]}
     e.bridge.scan.return_value = [t, new]
     await e.tick()
     assert any(

@@ -91,7 +91,7 @@ class Bridge40:
             else contained(self.options.source_root, remote)
         )
 
-    async def scan(self):
+    async def scan(self, rule_id=None):
         if not Path(self.options.source_root).is_dir():
             raise ValueError("下载根目录不存在或尚未挂载，请先检查插件路径配置")
         from module.database import Database
@@ -137,6 +137,8 @@ class Bridge40:
                     assigned = self.store.get("assignment:" + key)
                     if assigned is not None:
                         rid = assigned if any(r.id == assigned for r in rules) else None
+                    if rule_id is not None and rid != rule_id:
+                        continue
                     files = []
                     for f in await client.get_torrent_files(info["hash"]):
                         try:

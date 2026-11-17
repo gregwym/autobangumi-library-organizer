@@ -79,25 +79,10 @@ def classify(name):
 
 
 def version(name, task_name):
-    text = name + " " + task_name
-    parts = []
     m = re.match(r"^[\[【]([^\]】]+)[\]】]", Path(name).name) or re.match(
         r"^[\[【]([^\]】]+)[\]】]", task_name
     )
-    if m:
-        parts.append(clean(m[1]))
-    for pat in [
-        r"(?i)\b(?:2160p|1080p|720p|480p)\b",
-        r"(?i)\b(?:HEVC|AVC|x265|x264|AV1)\b",
-        r"(?i)\b(?:CHS(?:&JPN)?|CHT(?:&JPN)?)\b",
-        r"简繁|简日|繁日|简体|繁体",
-        r"(?i)(?:\d|\b)v([1-9]\d*)\b",
-    ]:
-        m = re.search(pat, text)
-        if m:
-            if not m.lastindex or int(m[1]) > 1:
-                parts.append("v" + m[1] if m.lastindex else m[0])
-    return clean(" ".join(parts)) if parts else ""
+    return clean(m[1]) if m else ""
 
 
 def task_key(instance, task_id):
@@ -136,15 +121,23 @@ def build(task, mapping, metadata, options):
             continue
         suffix = Path(name).suffix.lower()
         v = version(name, task["name"]) if options.version_suffix else ""
-        # Stable task discriminator prevents equal edition labels from overwriting one another.
-        label = (" - " + v if v else "") + (
-            " [" + task["key"][:8] + "]" if options.version_suffix else ""
+        # Task identity stays in SQLite; visible version names contain only the group.
+        label = " - " + v if v else ""
+        values = dict(
+            title=title,
+            year=year,
+            tmdb_id=mapping.tmdb_id,
+            season=mapping.season,
+            episode=0,
+            group=v,
+            version=label,
+            base=base,
         )
         target = None
         if suffix in VIDEO and (name in mapping.episodes or kind == "episode" or name == main):
             if mapping.media_type == "movie":
                 if name == main:
-                    target = folder / (base + label + suffix)
+                    target = folder / (clean(options.movie_template.format(**values)) + suffix)
                     item["identity"] = {"media_type": "movie", "tmdb_id": mapping.tmdb_id}
                 elif main:
                     target = folder / "extras" / clean(Path(name).name)
@@ -162,7 +155,10 @@ def build(task, mapping, metadata, options):
                     target = (
                         folder
                         / f"Season {mapping.season:02d}"
-                        / (f"{title} S{mapping.season:02d}E{ep:02d}" + label + suffix)
+                        / (
+                            clean(options.episode_template.format(**{**values, "episode": ep}))
+                            + suffix
+                        )
                     )
                     item["identity"] = {
                         "media_type": "tv",
@@ -180,9 +176,7 @@ def build(task, mapping, metadata, options):
             target = (
                 folder / category / task["key"][:8] / Path(*[clean(p) for p in rel.parts])
                 if kind == "resource"
-                else folder
-                / category
-                / (clean(Path(name).stem) + " [" + task["key"][:8] + "]" + suffix)
+                else folder / category / clean(Path(name).name)
             )
         if target:
             item["target"] = str(target)
