@@ -132,6 +132,9 @@ class Bridge40:
                         if match:
                             matches.append(rule)
                     rid = matches[0].id if len(matches) == 1 else None
+                    assigned = self.store.get("assignment:" + key)
+                    if assigned is not None:
+                        rid = assigned if any(r.id == assigned for r in rules) else None
                     files = []
                     for f in await client.get_torrent_files(info["hash"]):
                         try:
@@ -159,7 +162,9 @@ class Bridge40:
                         "task_id": info["hash"],
                         "name": info["name"],
                         "rule_id": rid,
-                        "suggested_title": matches[0].official_title if rid else info["name"],
+                        "suggested_title": next(
+                            (r.official_title for r in rules if r.id == rid), info["name"]
+                        ),
                         "files": files,
                     }
                     tasks.append(task)
@@ -228,3 +233,19 @@ class Bridge40:
             return "已请求扫描（不代表识别验证完成）"
         except Exception:
             return "扫描请求失败；硬链已保留，可重试"
+
+    async def rule(self, rule_id):
+        from module.database import Database
+        from module.models import Bangumi
+
+        async with Database() as db:
+            rule = await db.session.get(Bangumi, rule_id)
+            if rule is None or rule.deleted:
+                raise ValueError("番剧不存在或已删除")
+            return {
+                "id": rule.id,
+                "title": rule.official_title,
+                "season": max(0, rule.season + rule.season_offset),
+                "episode_offset": rule.episode_offset,
+                "media_type": "movie" if rule.episode_type == "movie" else "tv",
+            }

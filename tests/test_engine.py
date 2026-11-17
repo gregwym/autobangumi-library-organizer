@@ -175,3 +175,44 @@ async def test_automatic_conflict_does_not_repeat(env):
     await e.tick()
     assert len(list((e.store.path.parent / "backups").iterdir())) == count
     assert e.store.get("last_results")[0]["state"] == "held"
+
+
+async def test_rule_plan_does_not_include_other_show_or_invalidate_on_its_change(env):
+    import copy
+
+    e, t, src = env
+    other = copy.deepcopy(t)
+    other["key"] = "b" * 32
+    other["rule_id"] = 2
+    e.bridge.scan.return_value = [t, other]
+    p = await e.preview(rule_id=1)
+    assert {i["task"] for i in p["items"]} == {t["key"]}
+    other["name"] = "Other changed while previewing"
+    r = await e.apply(p["token"], rule_id=1)
+    assert len(r["results"]) == 1
+    assert all(row["key"].startswith(t["key"]) for row in e.store.files())
+
+
+async def test_rule_token_cannot_execute_for_other_rule(env):
+    e, t, src = env
+    p = await e.preview(rule_id=1)
+    with pytest.raises(ValueError, match="不属于当前番剧"):
+        await e.apply(p["token"], rule_id=2)
+    assert e.store.files() == []
+
+
+async def test_future_download_automatically_inherits_rule_mapping(env):
+    import copy
+
+    e, t, src = env
+    e.store.unbind(t["key"])
+    e.store.bind("rule:1", {"tmdb_id": 8, "season": 2})
+    e.store.set("automatic", True)
+    await e.tick()
+    new = copy.deepcopy(t)
+    new["key"] = "b" * 32
+    e.bridge.scan.return_value = [t, new]
+    await e.tick()
+    assert any(
+        row["key"].startswith(new["key"]) and row["state"] == "linked" for row in e.store.files()
+    )

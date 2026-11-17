@@ -128,3 +128,8 @@ class Store:
     def unbind(self, key):
         with self.db() as c:
             c.execute("DELETE FROM bindings WHERE key=?", (key,))
+
+    def direct_binding(self, key):
+        with self.db() as c:
+            row = c.execute("SELECT payload FROM bindings WHERE key=?", (key,)).fetchone()
+        return json.loads(row[0]) if row else None

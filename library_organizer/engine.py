@@ -27,9 +27,11 @@ class Engine:
     def settings_digest(self):
         return digest(self.options.model_dump(exclude={"jellyfin_api_key"}))
 
-    async def preview(self):
+    async def preview(self, rule_id=None):
         async with self.lock:
             tasks = await self.bridge.scan()
+            if rule_id is not None:
+                tasks = [t for t in tasks if t.get("rule_id") == rule_id]
             items = []
             mappings = {}
             for task in tasks:
@@ -53,6 +55,8 @@ class Engine:
                         }
                         for f in task["files"]
                     ]
+                for entry in entries:
+                    entry["rule_id"] = task.get("rule_id")
                 items.extend(entries)
             # Cross-task target collisions are never decided by iteration order.
             by_target = {}
@@ -79,6 +83,7 @@ class Engine:
                         i["target"] = None
             payload = {
                 "items": items,
+                "rule_id": rule_id,
                 "tasks_digest": digest(tasks),
                 "settings_digest": self.settings_digest(),
                 "mappings": mappings,
@@ -148,7 +153,7 @@ class Engine:
             # Preserve any existing ownership record; failed plans can be retried safely.
             return {"key": item["key"], "state": "failed", "detail": reason}
 
-    async def apply(self, token):
+    async def apply(self, token, rule_id=None):
         async with self.replay_lock, self.lock:
             if not self.store.get("active", False):
                 raise ValueError("请先启用媒体库接管")
@@ -156,7 +161,11 @@ class Engine:
             if health["native_rename"] or health["native_hardlink"]:
                 raise ValueError("原生整理或硬链仍启用，已停止以避免并发修改")
             plan = self.store.take_plan(token)
+            if plan.get("rule_id") != rule_id:
+                raise ValueError("预览不属于当前番剧，请重新预览")
             tasks = await self.bridge.scan()
+            if rule_id is not None:
+                tasks = [t for t in tasks if t.get("rule_id") == rule_id]
             if (
                 plan["tasks_digest"] != digest(tasks)
                 or plan["settings_digest"] != self.settings_digest()
@@ -168,7 +177,17 @@ class Engine:
             backup = str(self.store.backup())
             results = [self.link(i) for i in plan["items"]]
             self.store.set("last_results", results)
-            self.store.set("last_items", plan["items"])
+            retained = [
+                i
+                for i in self.store.get("last_items", [])
+                if rule_id is not None and i.get("rule_id") != rule_id
+            ]
+            self.store.set("last_items", retained + plan["items"])
+            for rid in {t.get("rule_id") for t in tasks}:
+                if rid is None:
+                    continue
+                keys = {i["key"] for i in plan["items"] if i.get("rule_id") == rid}
+                self.store.set(f"last_results:rule:{rid}", [r for r in results if r["key"] in keys])
             refresh = (
                 await self.bridge.refresh_jellyfin()
                 if any(r["state"] == "linked" for r in results)
