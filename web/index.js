@@ -1,4 +1,4 @@
-const css=`:host{display:block;font:14px/1.5 var(--ab-font-family,system-ui);color:var(--ab-color-text,#222)}*{box-sizing:border-box}details{border:1px solid var(--ab-color-border,#ddd);border-radius:var(--ab-radius-md,8px);overflow:hidden}summary{padding:7px 14px;font-weight:600;cursor:pointer;color:var(--ab-color-text-secondary,#666)}.body{padding:14px;background:var(--ab-color-surface,#fff);border-top:1px solid var(--ab-color-border,#ddd)}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}input,select,button,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--ab-color-border,#aaa);border-radius:6px;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.primary{background:var(--ab-color-primary,#5274d9);color:white}label{display:grid;gap:5px;margin:8px 0}label:has(input[type=checkbox]){display:flex;align-items:center;gap:8px}input[type=checkbox]{width:auto;margin:0;accent-color:var(--ab-color-primary,#526fe4)}select,textarea{max-width:100%;width:100%}textarea{min-height:70px}small,.muted{color:var(--ab-color-text-secondary,#777)}.plan{max-height:400px;overflow:auto}.item{border-bottom:1px solid var(--ab-color-border,#ddd);padding:9px 0;overflow-wrap:anywhere}#message{white-space:pre-wrap;margin-top:10px}.badge{border-radius:999px;padding:2px 9px;background:#8882}.error{color:#c65540}[hidden]{display:none!important}`;
+const css=`:host{display:block;font:14px/1.5 var(--ab-font-family,system-ui);color:var(--ab-color-text,#222)}*{box-sizing:border-box}details{border:1px solid var(--ab-color-border,#ddd);border-radius:var(--ab-radius-md,8px);overflow:hidden}summary{padding:7px 14px;font-weight:600;cursor:pointer;color:var(--ab-color-text-secondary,#666)}.body{padding:14px;background:var(--ab-color-surface,#fff);border-top:1px solid var(--ab-color-border,#ddd)}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}input,select,button,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--ab-color-border,#aaa);border-radius:6px;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.primary{background:var(--ab-color-primary,#5274d9);color:white}label{display:grid;gap:5px;margin:8px 0}label:has(input[type=checkbox]){display:flex;align-items:center;gap:8px}input[type=checkbox]{width:auto;margin:0;accent-color:var(--ab-color-primary,#526fe4)}select,textarea{max-width:100%;width:100%}textarea{min-height:70px}small,.muted{color:var(--ab-color-text-secondary,#777)}.plan{max-height:400px;overflow:auto}.item{border-bottom:1px solid var(--ab-color-border,#ddd);padding:9px 0;overflow-wrap:anywhere}#message{white-space:pre-wrap;margin-top:10px}.badge{border-radius:999px;padding:2px 9px;background:#8882}.error{color:#c65540}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;vertical-align:top;padding:9px 10px;border-bottom:1px solid var(--ab-color-border,#ddd)}th{position:sticky;top:0;background:var(--ab-color-surface,#fff)}td.path{min-width:230px;max-width:340px;overflow-wrap:anywhere;white-space:pre-wrap}td{min-width:90px}.table-scroll{overflow:auto;max-height:400px}[hidden]{display:none!important}`;
 const progressMarkup = `<section id="progress-panel" hidden aria-live="polite"><p id="progress-label"></p><progress aria-label="文件整理进度" id="progress-bar" max="1" value="0" style="width:100%;accent-color:var(--ab-color-primary,#5274d9)"></progress><p id="progress-current" class="muted" style="overflow-wrap:anywhere"></p><small id="progress-counts"></small></section>`;
 const stateNames = {linked:'已整理',exists:'已有链接',held:'待确认',failed:'失败'};
 function summary(rows) {
@@ -120,7 +120,7 @@ class Detail extends Panel {
         <select id="unassigned"></select><div class="row"><button id="assign">关联到本番</button></div>
       </div></details>
       <div class="row"><button id="preview">预览本番整理计划</button><button id="apply" class="primary" disabled>执行此计划</button><button id="verify">核对 Jellyfin 识别</button></div>
-      <div id="plan" class="plan"></div><details id="result-panel" hidden><summary>上次整理明细</summary><div id="results" class="body plan"></div></details>${progressMarkup}<div id="message" role="status"></div>`);
+      <div id="plan" class="plan"></div><details id="result-panel" hidden><summary>上次整理明细</summary><div id="results" class="table-scroll"></div><div class="row"><button id="result-prev">上一页</button><span id="result-page"></span><button id="result-next">下一页</button></div></details>${progressMarkup}<div id="message" role="status"></div>`);
     for(const id of ['type','query','tmdb'])this.$(id).oninput=()=>{this.dirty=true;this.invalidate();};
     this.action('search',async()=>{
       const rows=await this.host.api.get(`search?query=${encodeURIComponent(this.$('query').value)}&kind=${this.$('type').value}`);
@@ -166,6 +166,8 @@ class Detail extends Panel {
       const r=await this.host.api.post(`rules/${this.rid}/apply`,{token});
       this.renderResults(r.results);this.message(summary(r.results)+'\n'+r.jellyfin+'\n'+r.results.filter(x=>x.state==='failed').map(x=>x.detail).join('\n'));
     });
+    this.action('result-prev',()=>{this.resultPage--;this.renderResultPage();});
+    this.action('result-next',()=>{this.resultPage++;this.renderResultPage();});
     this.action('verify',async()=>{
       const rows=await this.host.api.post(`rules/${this.rid}/jellyfin/verify`,{});
       this.message(rows.length?rows.map(r=>`${r.state} · ${r.path} · ${r.detail}`).join('\n'):'本番暂无已执行的正片映射可核对。');
@@ -183,11 +185,31 @@ class Detail extends Panel {
     this.$('state').textContent=!data.active?'预览模式 · 请到全局设置接管整理':data.automatic?'自动整理已开启 · 下载完成后会使用本番映射':'自动整理已关闭 · 可以手动整理本番';
   }
   renderResults(rows) {
+    this.resultRows=rows;this.resultPage=0;
     this.$('result-panel').hidden=!rows.length;
-    this.$('results').replaceChildren(...rows.map(r=>{
-      const el=document.createElement('div');el.className='item';
-      el.textContent=`${r.name||r.key} · ${r.detail||stateNames[r.state]||r.state}`;return el;
-    }));
+    this.renderResultPage();
+  }
+  syncPagination() {
+    if(!this.$('result-prev'))return;
+    this.$('result-prev').disabled=!this.resultPage;
+    this.$('result-next').disabled=(this.resultPage+1)*25>=(this.resultRows?.length||0);
+  }
+  renderResultPage() {
+    const rows=this.resultRows||[],total=rows.length;
+    this.resultPage=Math.max(0,Math.min(this.resultPage||0,Math.ceil(total/25)-1));
+    const start=this.resultPage*25;
+    const table=document.createElement('table'),head=table.createTHead().insertRow();
+    for(const title of ['源文件','媒体库目标','处理方式','状态','说明']){const th=document.createElement('th');th.scope='col';th.textContent=title;head.append(th);}
+    const body=table.createTBody(),methods={hardlink:'硬链',reflink:'Reflink',copy:'普通复制'};
+    for(const r of rows.slice(start,start+25)) {
+      const tr=body.insertRow(),method=methods[r.method]||'—';
+      const action=r.action==='relocated'?'复用副本 · '+method:r.action==='unchanged'?'已存在 · '+method:method;
+      const values=[r.source||r.name||r.key,r.target||'—',action,stateNames[r.state]||r.state,r.detail||'—'];
+      values.forEach((value,i)=>{const td=tr.insertCell();td.textContent=value;if(i<2)td.className='path';});
+    }
+    this.$('results').replaceChildren(table);
+    this.$('result-page').textContent=total?`${start+1}–${Math.min(start+25,total)} / ${total} 条`:'暂无记录';
+    this.syncPagination();
   }
   async scan() {
     const selected=this.$('task').value;
@@ -215,7 +237,7 @@ class Detail extends Panel {
     this.$('main').replaceChildren(new Option('自动（仅单一候选时）',''),...videos.map(f=>new Option(f.name,f.name)));
     this.$('main').value=m.main_file||'';
   }
-  syncButtons() {this.$('apply').disabled=!this.token;this.$('save-task').disabled=!this.selected();this.$('inherit').disabled=!this.selected()?.override;}
+  syncButtons() {this.syncPagination();this.$('apply').disabled=!this.token;this.$('save-task').disabled=!this.selected();this.$('inherit').disabled=!this.selected()?.override;}
 }
 if(!customElements.get('ab-plugin-library-organizer'))customElements.define('ab-plugin-library-organizer',Settings);
 if(!customElements.get('ab-plugin-library-organizer-detail'))customElements.define('ab-plugin-library-organizer-detail',Detail);

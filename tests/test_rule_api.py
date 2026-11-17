@@ -111,3 +111,26 @@ async def test_rule_offsets_follow_ab_and_ignore_duplicate_input(api):
         assert obj.store.binding(task)["episode_offset"] == -12
         obj.store.bind(task["key"], {"tmdb_id": 8, "season": 0, "episode_offset": 0})
         assert obj.store.binding(task)["season"] == 0
+
+
+async def test_old_result_rows_expose_saved_source_and_target(api):
+    obj, task, client = api
+    obj.store.set(
+        "last_items",
+        [
+            {
+                "key": "file1",
+                "name": "01.mkv",
+                "source": "/downloads/01.mkv",
+                "target": "/library/01.mkv",
+            }
+        ],
+    )
+    obj.store.set(
+        "last_results:rule:1",
+        [{"key": "file1", "state": "linked", "method": "copy", "target": "/library/old.mkv"}],
+    )
+    async with client:
+        row = (await client.get("/rules/1/library")).json()["results"][0]
+        assert row["source"] == "/downloads/01.mkv"
+        assert row["target"] == "/library/old.mkv"

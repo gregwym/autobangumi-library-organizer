@@ -49,6 +49,17 @@ class LibraryOrganizer(Plugin[Options]):
     def api(self):
         router = APIRouter()
 
+        def result_rows(rows):
+            # Older releases kept full paths in last_items, but not in result rows.
+            items = {i["key"]: i for i in self.store.get("last_items", [])}
+            return [
+                {
+                    **{k: items.get(r["key"], {}).get(k) for k in ("name", "source", "target")},
+                    **r,
+                }
+                for r in rows
+            ]
+
         @router.get("/progress")
         async def progress(rule_id: int | None = None):
             return self.engine.progress(rule_id)
@@ -66,7 +77,7 @@ class LibraryOrganizer(Plugin[Options]):
                 "automatic": self.store.get("automatic", False),
                 "health": self.bridge.health(),
                 "error": self.store.get("error"),
-                "results": self.store.get("last_results", []),
+                "results": result_rows(self.store.get("last_results", [])),
                 "jellyfin": self.store.get("jellyfin_refresh"),
                 "update": self.updater.status(),
             }
@@ -119,7 +130,7 @@ class LibraryOrganizer(Plugin[Options]):
                 "mapping": mapping,
                 "active": self.store.get("active", False),
                 "automatic": self.store.get("automatic", False),
-                "results": self.store.get(f"last_results:rule:{rid}", []),
+                "results": result_rows(self.store.get(f"last_results:rule:{rid}", [])),
             }
 
         @router.post("/rules/{rid}/scan")

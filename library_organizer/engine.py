@@ -279,7 +279,7 @@ class Engine:
                 await worker
                 raise
             for item, result in zip(plan["items"], results, strict=True):
-                result.update(name=item["name"], target=item["target"])
+                result.update(name=item["name"], source=item["source"], target=item["target"])
             self.store.set("last_results", results)
             retained = [
                 i
