@@ -106,7 +106,7 @@ class Detail extends Panel {
       <div class="row"><button id="save" class="primary">保存本番设置</button><button id="scan">刷新下载任务</button></div>
       <p id="task-count" class="muted">点击“刷新下载任务”查看已有资源；设置可在下载完成前保存。</p>
       <details id="task-panel"><summary>下载任务与逐文件设置</summary><div class="body">
-        <label>本番下载任务<select id="task"></select></label><p id="inherit-state" class="muted"></p>
+        <label>本番下载任务<select id="task"></select></label><p id="association" class="muted"></p><p id="inherit-state" class="muted"></p>
         <div id="override-fields">
           <div class="row"><label>此任务的季<input id="task-season" type="number" min="0"></label><label>此任务集数偏移<input id="task-offset" type="number"></label></div>
           <p class="muted">逐文件填写集号可覆盖自动识别；留空则自动识别。这里的设置只影响当前下载任务。</p>
@@ -219,12 +219,17 @@ class Detail extends Panel {
     this.$('task-count').textContent=this.tasks.length?`${this.tasks.length} 个已完成下载任务`:'尚无已关联的完成下载；仍可先保存本番映射，等待后续下载。';
     this.$('override-fields').hidden=!this.tasks.length;
     this.$('unassigned-panel').hidden=!data.unassigned.length;
-    this.$('unassigned').replaceChildren(...data.unassigned.map(t=>new Option(t.name,t.key)));
+    this.$('unassigned').replaceChildren(...data.unassigned.map(t=>{
+      const option=new Option(`${t.name} · ${t.association?.reason||'待确认归属'}`,t.key);
+      option.disabled=t.association?.assignable===false;return option;
+    }));
     this.choose();
   }
   selected() {return this.tasks?.find(t=>t.key===this.$('task').value);}
   choose() {
     const t=this.selected();this.syncButtons();if(!t)return;
+    const a=t.association||{};
+    this.$('association').textContent=`归属：entry ${t.rule_id} · ${a.reason||'已关联'}${a.record_ids?.length?' · AB 种子记录 '+a.record_ids.join(', '):''}`;
     const m=t.override||this.mapping||{};
     this.$('inherit-state').textContent=t.override?`此任务使用独立设置（TMDB ${m.tmdb_id}）`:'此任务跟随本番设置，修改本番映射后会一同更新。';
     this.$('task-season').value=m.season??1;this.$('task-offset').value=m.episode_offset??0;

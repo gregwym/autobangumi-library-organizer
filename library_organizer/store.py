@@ -44,11 +44,57 @@ class Store:
 
     def save_task(self, task):
         with self.db() as c:
-            c.execute("INSERT OR REPLACE INTO tasks VALUES (?,?)", (task["key"], json.dumps(task)))
+            c.execute(
+                "INSERT INTO tasks VALUES (?,?) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload WHERE tasks.payload IS NOT excluded.payload",
+                (task["key"], json.dumps(task)),
+            )
 
     def tasks(self):
         with self.db() as c:
             return [json.loads(r[0]) for r in c.execute("SELECT payload FROM tasks ORDER BY key")]
+
+    def reconcile_history(self, associations):
+        """Correct cached ownership/history only; never move files or rewrite bindings."""
+        with self.db() as c:
+            kv = {r["key"]: json.loads(r["value"]) for r in c.execute("SELECT * FROM kv")}
+            owners, changed = {}, False
+            for row in c.execute("SELECT * FROM tasks").fetchall():
+                task = json.loads(row["payload"])
+                rid, evidence = associations.resolve(
+                    task.get("instance", "default"),
+                    task.get("task_id", ""),
+                    kv.get("assignment:" + task["key"]),
+                )
+                owners[task["key"]] = rid
+                changed |= task.get("rule_id") != rid
+                task.update(rule_id=rid, association=evidence)
+                payload = json.dumps(task)
+                if payload != row["payload"]:
+                    c.execute("UPDATE tasks SET payload=? WHERE key=?", (payload, task["key"]))
+            if not changed:
+                return
+            items = kv.get("last_items", [])
+            for item in items:
+                item["rule_id"] = owners.get(item["task"])
+            c.execute("INSERT OR REPLACE INTO kv VALUES ('last_items',?)", (json.dumps(items),))
+            rows = {}
+            for key, value in kv.items():
+                if key.startswith("last_results:rule:"):
+                    rows.update((r["key"], r) for r in value)
+            rows.update((r["key"], r) for r in kv.get("last_results", []))
+            grouped = {}
+            for row in rows.values():
+                rid = owners.get(row["key"].rsplit(":", 1)[0])
+                if rid is not None:
+                    grouped.setdefault(rid, []).append(row)
+            c.execute("DELETE FROM kv WHERE key LIKE 'last_results:rule:%'")
+            for rid, value in grouped.items():
+                c.execute(
+                    "INSERT INTO kv VALUES (?,?)", (f"last_results:rule:{rid}", json.dumps(value))
+                )
+            progress = kv.get("progress")
+            if progress and progress.get("state") != "running":
+                c.execute("DELETE FROM kv WHERE key='progress'")
 
     def bind(self, key, mapping):
         with self.db() as c:
@@ -74,7 +120,12 @@ class Store:
                 c.execute("DELETE FROM owned WHERE target=?", (target,))
                 c.execute("DELETE FROM transfers WHERE target=?", (target,))
             c.execute(
-                "INSERT OR REPLACE INTO files VALUES (?,?,?,?,?,?,?)",
+                """INSERT INTO files VALUES (?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET
+                source=excluded.source,target=excluded.target,fingerprint=excluded.fingerprint,
+                state=excluded.state,detail=excluded.detail,updated=excluded.updated
+                WHERE files.source IS NOT excluded.source OR files.target IS NOT excluded.target
+                OR files.fingerprint IS NOT excluded.fingerprint OR files.state IS NOT excluded.state
+                OR files.detail IS NOT excluded.detail""",
                 (
                     item["key"],
                     item["source"],

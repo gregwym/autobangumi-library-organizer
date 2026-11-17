@@ -2,12 +2,12 @@
 
 import json
 import os
-import re
 import shutil
 import time
 from pathlib import Path
 from urllib.parse import urlencode
 
+from .association import Associations
 from .planner import contained, fingerprint, task_key
 
 
@@ -91,13 +91,9 @@ class Bridge40:
             else contained(self.options.source_root, remote)
         )
 
-    async def scan(self, rule_id=None):
-        if not Path(self.options.source_root).is_dir():
-            raise ValueError("下载根目录不存在或尚未挂载，请先检查插件路径配置")
+    async def associations(self):
         from module.database import Database
-        from module.downloader import DownloadClient
-        from module.downloader.download_client import downloader_ids
-        from module.models import Bangumi
+        from module.models import Bangumi, Torrent
         from sqlmodel import select
 
         async with Database() as db:
@@ -106,6 +102,23 @@ class Bridge40:
                 .scalars()
                 .all()
             )
+            records = (await db.session.execute(select(Torrent))).scalars().all()
+        return Associations(records, rules)
+
+    async def reconcile_history(self):
+        import asyncio
+
+        associations = await self.associations()
+        await asyncio.to_thread(self.store.reconcile_history, associations)
+
+    async def scan(self, rule_id=None, bound_only=False):
+        if not Path(self.options.source_root).is_dir():
+            raise ValueError("下载根目录不存在或尚未挂载，请先检查插件路径配置")
+        from module.downloader import DownloadClient
+        from module.downloader.download_client import downloader_ids
+
+        associations = await self.associations()
+        rules = list(associations.rules.values())
         tasks = []
         for instance in downloader_ids():
             async with DownloadClient(instance) as client:
@@ -120,26 +133,16 @@ class Bridge40:
                     except ValueError:
                         continue
                     key = task_key(instance, str(info["hash"]))
-                    matches = []
-                    for rule in rules:
-                        if rule.downloader_id and rule.downloader_id != instance:
-                            continue
-                        # Do not use qB tags or folder labels as identity. Ambiguity is held.
-                        try:
-                            match = bool(
-                                rule.title_raw and re.search(rule.title_raw, info["name"], re.I)
-                            )
-                        except re.error:
-                            match = False
-                        if match:
-                            matches.append(rule)
-                    rid = matches[0].id if len(matches) == 1 else None
-                    assigned = self.store.get("assignment:" + key)
-                    if assigned is not None:
-                        rid = assigned if any(r.id == assigned for r in rules) else None
+                    rid, association = associations.resolve(
+                        instance, str(info["hash"]), self.store.get("assignment:" + key)
+                    )
                     if rule_id is not None and rid != rule_id:
                         continue
                     matched_rule = next((r for r in rules if r.id == rid), None)
+                    if bound_only and (
+                        rid is None or not self.store.binding({"key": key, "rule_id": rid})
+                    ):
+                        continue
                     files = []
                     for f in await client.get_torrent_files(info["hash"]):
                         try:
@@ -167,6 +170,7 @@ class Bridge40:
                         "task_id": info["hash"],
                         "name": info["name"],
                         "rule_id": rid,
+                        "association": association,
                         "rule_mapping": {
                             "season": max(0, matched_rule.season + matched_rule.season_offset),
                             "episode_offset": matched_rule.episode_offset,

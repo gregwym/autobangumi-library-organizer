@@ -97,9 +97,9 @@ class Engine:
             and json.loads(ownership["fingerprint"]) == fingerprint(target)
         )
 
-    async def preview(self, rule_id=None):
+    async def preview(self, rule_id=None, bound_only=False):
         async with self.lock:
-            tasks = await self.bridge.scan(rule_id=rule_id)
+            tasks = await self.bridge.scan(rule_id=rule_id, bound_only=bound_only)
             if rule_id is not None:
                 tasks = [t for t in tasks if t.get("rule_id") == rule_id]
             items = []
@@ -158,6 +158,7 @@ class Engine:
             payload = {
                 "items": items,
                 "rule_id": rule_id,
+                "bound_only": bound_only,
                 "tasks_digest": digest(tasks),
                 "settings_digest": self.settings_digest(),
                 "mappings": mappings,
@@ -239,9 +240,10 @@ class Engine:
             self.store.record(item, "linked", detail, obsolete=obsolete)
             return {
                 "key": item["key"],
-                "state": "linked",
+                "state": "exists" if action == "unchanged" and not obsolete else "linked",
                 "method": method,
                 "action": action,
+                "changed": action != "unchanged" or bool(obsolete),
                 "detail": detail,
             }
         except (OSError, ValueError) as e:
@@ -258,7 +260,9 @@ class Engine:
             plan = self.store.take_plan(token)
             if plan.get("rule_id") != rule_id:
                 raise ValueError("预览不属于当前番剧，请重新预览")
-            tasks = await self.bridge.scan(rule_id=rule_id)
+            tasks = await self.bridge.scan(
+                rule_id=rule_id, bound_only=plan.get("bound_only", False)
+            )
             if rule_id is not None:
                 tasks = [t for t in tasks if t.get("rule_id") == rule_id]
             if (
@@ -294,7 +298,7 @@ class Engine:
                 self.store.set(f"last_results:rule:{rid}", [r for r in results if r["key"] in keys])
             refresh = (
                 await self.bridge.refresh_jellyfin()
-                if any(r["state"] == "linked" for r in results)
+                if any(r.get("changed") for r in results)
                 else "无新增链接"
             )
             self.store.set("jellyfin_refresh", refresh)
@@ -308,7 +312,7 @@ class Engine:
         if now < self.store.get("retry_at", 0):
             return
         try:
-            plan = await self.preview()
+            plan = await self.preview(bound_only=True)
             signature = digest(plan["items"])
             last = self.store.get("automatic_signature")
             if last == signature:

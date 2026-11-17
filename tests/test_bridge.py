@@ -27,7 +27,7 @@ async def test_scan_uses_only_read_apis_and_ignores_tags(tmp_path, monkeypatch):
     from module import downloader
     from module.database import Database
     from module.downloader import download_client
-    from module.models import Bangumi
+    from module.models import Bangumi, Torrent
 
     src = tmp_path / "downloads"
     src.mkdir()
@@ -36,6 +36,8 @@ async def test_scan_uses_only_read_apis_and_ignores_tags(tmp_path, monkeypatch):
     async with Database() as db:
         rule = Bangumi(official_title="Show", title_raw="Show", season=1, deleted=False)
         db.add(rule)
+        await db.commit()
+        db.add(Torrent(bangumi_id=rule.id, qb_hash="a" * 40, downloader_id="default"))
         await db.commit()
     calls = []
 

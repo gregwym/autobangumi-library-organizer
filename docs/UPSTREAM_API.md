@@ -31,6 +31,10 @@ DownloadFile 至少含稳定 file_id、下载器相对路径、本地路径映�
 
 提交关联（download_id → bangumi_id / release_id / submitted policy revision）和提交意图须先落库，再发送网络请求，完成后对账。远端结果不确定不能盲目重发。插件更新不得改变 downloader 实例身份。
 
+0.5.0 兼容实现已改为 AB Torrent.bangumi_id + downloader_id + qb_hash 确认 entry；历史 qb_hash 为空时只解析标准 magnet BTIH 或 mikanani.me/Download/YYYYMMDD/<hash>.torrent，再与 qB 精确核对。标题正则和下载器标签不参与归属判定。缺失/冲突关联保持待确认，人工关联不能覆盖明确的 AB 所属 entry。单番预览在读取下载文件清单前限制归属，执行时重新核对，旧明细仅更正归属而不搬动媒体文件。此临时 URL 兼容逻辑不能替代正式的持久下载关联 API。
+
+不同 entry 可映射同一 TMDB 作品和季，在目标库保留多个组版本；不可反过来按媒体库身份扩大源文件范围。增量验收覆盖新任务完成、任务内字幕随后完成、AB 记录延迟出现、重复扫描零重复复制，以及修改一个 entry 不触碰另一个 entry 的文件。
+
 未来移除 `ab:<bangumi_id>`、`ab:renamed` 的身份/状态作用；旧 tag 只作一次性迁移提示，需与 DB、任务文件核对，之后不读写。用户自有标签不删除。
 
 ## 3. 订阅审核需要的正式接口

@@ -30,6 +30,7 @@ class LibraryOrganizer(Plugin[Options]):
     async def setup(self):
         self.store = Store(self.ctx.data_dir / "library.sqlite3")
         self.bridge = Bridge40(self.config, self.store)
+        await self.bridge.reconcile_history()
         self.bridge.setup()
         self.engine = Engine(self.store, self.bridge, self.config)
         self.updater = Updater(Path(__file__).resolve().parents[1], self.ctx.data_dir, self.engine)
@@ -111,6 +112,7 @@ class LibraryOrganizer(Plugin[Options]):
                 "key": task["key"],
                 "name": task["name"],
                 "rule_id": task["rule_id"],
+                "association": task.get("association", {}),
                 "override": self.store.direct_binding(task["key"]),
                 "files": [
                     {"name": f["name"], "complete": f["progress"] >= 1} for f in task["files"]
@@ -120,6 +122,8 @@ class LibraryOrganizer(Plugin[Options]):
         @router.get("/rules/{rid}/library")
         async def rule_library(rid: int):
             rule = await require_rule(rid)
+            async with self.engine.lock:
+                await self.bridge.reconcile_history()
             mapping = self.store.direct_binding(f"rule:{rid}")
             if mapping and mapping.get("follow_ab", True):
                 mapping.update(
@@ -166,6 +170,10 @@ class LibraryOrganizer(Plugin[Options]):
                 task = next((t for t in await scan_tasks() if t["key"] == body.task_key), None)
                 if task is None:
                     raise HTTPException(404, "下载任务不存在")
+                if not task.get("association", {}).get("assignable", True):
+                    raise HTTPException(
+                        409, "此任务已有 AB 归属或归属冲突，请在 AB 修正，不能在插件中跨 entry 关联"
+                    )
                 if task["rule_id"] is not None and task["rule_id"] != rid:
                     raise HTTPException(409, "任务已关联其他番剧，不能直接改绑")
                 self.store.set("assignment:" + body.task_key, rid)
@@ -255,7 +263,7 @@ class LibraryOrganizer(Plugin[Options]):
         @router.post("/binding")
         async def binding(body: Binding):
             async with self.engine.lock:
-                task = next((t for t in self.store.tasks() if t["key"] == body.task_key), None)
+                task = next((t for t in await scan_tasks() if t["key"] == body.task_key), None)
                 if not task:
                     raise HTTPException(404, "任务不存在，请重新扫描")
                 if body.rule_id is not None and task["rule_id"] != body.rule_id:

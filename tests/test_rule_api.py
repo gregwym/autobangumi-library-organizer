@@ -27,6 +27,7 @@ def api(tmp_path):
             }
         ),
         scan=AsyncMock(return_value=[task]),
+        reconcile_history=AsyncMock(),
         metadata=AsyncMock(return_value={"title": "Show", "episodes": [1]}),
     )
     obj = LibraryOrganizer(SimpleNamespace(config=options))
@@ -64,6 +65,27 @@ async def test_task_scope_cannot_modify_another_show(api):
             await client.post("/rules/2/assign", json={"task_key": task["key"]})
         ).status_code == 409
         assert obj.store.binding(task) is None
+
+
+async def test_unresolved_ab_conflict_cannot_be_manually_claimed(api):
+    obj, task, client = api
+    task.update(rule_id=None, association={"assignable": False, "source": "conflict"})
+    async with client:
+        response = await client.post("/rules/1/assign", json={"task_key": task["key"]})
+        assert response.status_code == 409
+        assert obj.store.get("assignment:" + task["key"]) is None
+
+
+async def test_legacy_binding_rechecks_current_owner(api):
+    obj, task, client = api
+    obj.store.save_task(task)
+    task["rule_id"] = 2
+    async with client:
+        response = await client.post(
+            "/binding", json={"task_key": task["key"], "rule_id": 1, "mapping": {"tmdb_id": 9}}
+        )
+        assert response.status_code == 409
+        assert obj.store.direct_binding("rule:1") is None
 
 
 async def test_explicit_assignment_and_inheritance(api):
