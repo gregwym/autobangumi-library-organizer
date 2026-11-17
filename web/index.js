@@ -23,7 +23,7 @@ class Panel extends HTMLElement {
     };
     poll();
   }
-  disconnectedCallback() {clearTimeout(this.progressTimer);}
+  disconnectedCallback() {clearTimeout(this.progressTimer);this.focusCleanup?.();}
   renderProgress(p) {
     this.$('progress-panel').hidden=!p;if(!p)return;
     const labels={running:'正在整理',completed:'文件处理完成',interrupted:'整理已中断，请重新预览后继续'};
@@ -97,6 +97,23 @@ class Settings extends Panel {
 }
 class Detail extends Panel {
   connectedCallback() {
+    // AB 4.0's Vueuc focus trap uses the deepest composed target with Node.contains(),
+    // which cannot cross Shadow DOM. Retarget only this panel's focus events to
+    // AB's light-DOM slot, matching the native event.target seen by the document.
+    // Do not disable the modal trap or alter focus events outside this plugin.
+    const lightHost=this.getRootNode().host;
+    const dialog=lightHost?.closest('[role="dialog"]');
+    if(dialog) {
+      const retarget=event=>{
+        const path=event.composedPath();
+        if(path.includes(this)&&path.includes(lightHost)&&dialog.contains(lightHost)) {
+          const visible=path.slice(path.indexOf(lightHost));
+          Object.defineProperty(event,'composedPath',{value:()=>visible});
+        }
+      };
+      window.addEventListener('focus',retarget,true);
+      this.focusCleanup=()=>window.removeEventListener('focus',retarget,true);
+    }
     this.rid=Number(this.context?.bangumiId);
     this.mount(`<p id="state" class="muted"></p>
       <p>本番的设置对后续下载持续生效。自动整理开启时，保存后会在下次扫描生效。</p>

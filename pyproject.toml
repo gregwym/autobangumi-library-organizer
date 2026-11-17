@@ -1,6 +1,6 @@
 [project]
 name = "autobangumi-library-organizer"
-version = "0.7.1"
+version = "0.7.2"
 description = "TMDB library organizer for AutoBangumi 4.0.0"
 requires-python = ">=3.14"
 

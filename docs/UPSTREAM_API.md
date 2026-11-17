@@ -123,3 +123,7 @@ AB 内置 media-server-refresh 使用旧 `X-Emby-Token`。Jellyfin 12 默认禁�
 独立音乐合集入口应使用 Mixed 内容类型，以保留父目录范围。Boxsets 类型在 Jellyfin Web 打开全局合集视图，会把电影合集也展示在音乐入口；清单本身只关联音乐目录。
 
 0.7.1 新增 entry 级 `scope=all|resources`，资源范围限制优先于任务覆盖，保存于插件独立绑定中，不修改 AB 原生季度或下载路径。上游详情扩展 API 应允许这一类插件特定的逐番策略，并在自动扫描时读取同一有效配置。
+
+### Shadow DOM 与弹窗焦点（0.7.2 兼容层）
+
+AB 4.0 的 Naive UI / Vueuc 焦点陷阱以 `mainEl.contains(getPreciseEventTarget(event))` 判断边界；插件双层 Shadow DOM 中的输入不满足 Node.contains，导致焦点立即跳回弹窗标签。上游应按 `event.composedPath().includes(mainEl)`（并正确处理 Tab 边界）判断，不应全局关闭焦点陷阱。插件临时仅对自身详情面板的 focus 事件，把 composedPath 的起点重定位到 AB 的 light-DOM slot；外部焦点事件不变，卸载时移除监听。参考 [Vueuc FocusTrap](https://github.com/07akioni/vueuc/blob/main/src/focus-trap/src/index.ts)。
