@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from .collections import update_collections
+from .identity import from_ab
 from .models import Mapping
 from .planner import build, contained, destination, fingerprint
 from .transfer import publish
@@ -86,7 +87,7 @@ class Engine:
         return self.store
 
     def settings_digest(self):
-        return digest({"layout": 5, "options": self.options.model_dump()})
+        return digest({"layout": 6, "options": self.options.model_dump()})
 
     def ownership(self, item, target):
         return next((r for r in self.store.owned(item["key"]) if r["target"] == str(target)), None)
@@ -98,9 +99,17 @@ class Engine:
             and json.loads(ownership["fingerprint"]) == fingerprint(target)
         )
 
-    async def preview(self, rule_id=None, bound_only=False):
+    async def resolve(self, task, raw):
+        if raw and raw.get("tmdb_id"):
+            mapping = Mapping.model_validate(raw)
+            return mapping, await self.bridge.metadata(mapping)
+        return from_ab(task, raw)
+
+    async def preview(self, rule_id=None, bound_only=False, automatic=False):
         async with self.lock:
-            tasks = await self.bridge.scan(rule_id=rule_id, bound_only=bound_only)
+            tasks = await self.bridge.scan(
+                rule_id=rule_id, bound_only=bound_only, associated_only=automatic
+            )
             if rule_id is not None:
                 tasks = [t for t in tasks if t.get("rule_id") == rule_id]
             items = []
@@ -108,11 +117,10 @@ class Engine:
             for task in tasks:
                 raw = self.store.binding(task)
                 mappings[task["key"]] = raw
-                if raw:
-                    mapping = Mapping.model_validate(raw)
-                    metadata = await self.bridge.metadata(mapping)
+                try:
+                    mapping, metadata = await self.resolve(task, raw)
                     entries = await asyncio.to_thread(build, task, mapping, metadata, self.options)
-                else:
+                except (ValueError, OSError) as error:
                     entries = [
                         {
                             "key": task["key"] + ":" + str(f["index"]),
@@ -122,12 +130,14 @@ class Engine:
                             "target": None,
                             "fingerprint": f.get("fingerprint"),
                             "kind": "unknown",
-                            "reason": "请先绑定 TMDB 条目",
+                            "reason": str(error),
+                            "retryable": bool(raw and raw.get("tmdb_id")),
                         }
                         for f in task["files"]
                     ]
                 for entry in entries:
                     entry["rule_id"] = task.get("rule_id")
+                    entry["restore_missing"] = not automatic
                 items.extend(entries)
             # Cross-task target collisions are never decided by iteration order.
             by_target = {}
@@ -171,6 +181,7 @@ class Engine:
                 "items": items,
                 "rule_id": rule_id,
                 "bound_only": bound_only,
+                "automatic": automatic,
                 "tasks_digest": digest(tasks),
                 "settings_digest": self.settings_digest(),
                 "mappings": mappings,
@@ -206,6 +217,19 @@ class Engine:
                 if not Path(self.options.music_root).is_dir():
                     raise ValueError("音乐库根目录不存在或尚未挂载，已保留原归档")
             ownership = self.ownership(item, dst)
+            if (
+                not dst.exists()
+                and ownership
+                and json.loads(ownership["source_fingerprint"]) == item["fingerprint"]
+                and self.store.completed(item)
+                and not item.get("restore_missing", True)
+            ):
+                return {
+                    "key": item["key"],
+                    "state": "skipped",
+                    "changed": False,
+                    "detail": "已整理的目标被移除，自动扫描不重建；可手动预览补链",
+                }
             method = ownership["method"] if ownership else None
             action = "unchanged" if dst.exists() else "created"
             if dst.exists():
@@ -333,7 +357,9 @@ class Engine:
             if plan.get("rule_id") != rule_id:
                 raise ValueError("预览不属于当前番剧，请重新预览")
             tasks = await self.bridge.scan(
-                rule_id=rule_id, bound_only=plan.get("bound_only", False)
+                rule_id=rule_id,
+                bound_only=plan.get("bound_only", False),
+                associated_only=plan.get("automatic", False),
             )
             if rule_id is not None:
                 tasks = [t for t in tasks if t.get("rule_id") == rule_id]
@@ -344,7 +370,7 @@ class Engine:
                 raise ValueError("文件或配置已变化，请重新预览")
             for task in tasks:
                 if plan["mappings"].get(task["key"]) != self.store.binding(task):
-                    raise ValueError("TMDB 映射已变化，请重新预览")
+                    raise ValueError("整理映射已变化，请重新预览")
             backup = str(self.store.backup())
             # Large copies must not block AB's HTTP/event loop. Retain the lock
             # until the worker stops even if a client disconnects/cancels.
@@ -386,13 +412,15 @@ class Engine:
         if now < self.store.get("retry_at", 0):
             return
         try:
-            plan = await self.preview(bound_only=True)
+            plan = await self.preview(automatic=True)
             signature = digest({"items": plan["items"], "settings": self.settings_digest()})
             last = self.store.get("automatic_signature")
             if last == signature:
                 return
             result = await self.apply(plan["token"])
-            failed = any(r["state"] == "failed" for r in result["results"] + result["collections"])
+            failed = any(i.get("retryable") for i in plan["items"]) or any(
+                r["state"] == "failed" for r in result["results"] + result["collections"]
+            )
             if failed:
                 attempts = min(self.store.get("attempts", 0) + 1, 8)
                 self.store.set("attempts", attempts)

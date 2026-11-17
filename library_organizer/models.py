@@ -41,7 +41,7 @@ class Options(BaseModel):
         default="{base}{version}",
         title="电影文件名模板",
         max_length=512,
-        description="不含扩展名。base 为作品名、年份与 TMDB ID；version 为组名后缀。默认值适合 Jellyfin。",
+        description="不含扩展名。base 为作品名、年份与可选 TMDB ID；version 为组名后缀。默认值适合 Jellyfin。",
     )
     collections_root: str = Field(
         default="",
@@ -111,7 +111,8 @@ class Options(BaseModel):
 class Mapping(BaseModel):
     scope: Literal["all", "resources"] = "all"
     media_type: Literal["tv", "movie"] = "tv"
-    tmdb_id: int = Field(gt=0)
+    # An absent ID follows the existing AB entry; TMDB is an optional correction.
+    tmdb_id: int | None = Field(default=None, gt=0)
     season: int = Field(default=1, ge=0, le=999)
     episode_offset: int = Field(default=0, ge=-100000, le=100000)
     # Overrides use the exact source relative name, never just the inferred episode.

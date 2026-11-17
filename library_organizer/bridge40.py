@@ -137,7 +137,26 @@ class Bridge40:
         associations = await self.associations()
         await asyncio.to_thread(self.store.reconcile_history, associations)
 
-    async def scan(self, rule_id=None, bound_only=False, discover_unassigned=False):
+    @staticmethod
+    def rule_data(rule):
+        # Match AB's gen_save_path: invalid season offsets fall back to the
+        # original season; ordinary episodes must not become Season 00.
+        season = rule.season + rule.season_offset
+        if season < (0 if rule.episode_type == "special" else 1):
+            season = rule.season
+        return {
+            "id": rule.id,
+            "title": rule.official_title,
+            "year": rule.year or "",
+            "season": season,
+            "episode_offset": rule.episode_offset,
+            "episode_type": rule.episode_type,
+            "media_type": "movie" if rule.episode_type == "movie" else "tv",
+        }
+
+    async def scan(
+        self, rule_id=None, bound_only=False, discover_unassigned=False, associated_only=False
+    ):
         import asyncio
 
         if not Path(self.options.source_root).is_dir():
@@ -172,6 +191,8 @@ class Bridge40:
                         if not (discover_unassigned and rid is None):
                             continue
                     matched_rule = next((r for r in rules if r.id == rid), None)
+                    if associated_only and matched_rule is None:
+                        continue
                     if bound_only and (
                         rid is None or key not in bindings and f"rule:{rid}" not in bindings
                     ):
@@ -208,9 +229,9 @@ class Bridge40:
                         "name": info["name"],
                         "rule_id": rid,
                         "association": association,
+                        "ab_metadata": self.rule_data(matched_rule) if matched_rule else {},
                         "rule_mapping": {
-                            "season": max(0, matched_rule.season + matched_rule.season_offset),
-                            "episode_offset": matched_rule.episode_offset,
+                            k: self.rule_data(matched_rule)[k] for k in ("season", "episode_offset")
                         }
                         if matched_rule
                         else {},
@@ -232,11 +253,12 @@ class Bridge40:
                     assignments,
                     bindings,
                     rule_id,
+                    bound_only,
                 )
             )
         return tasks
 
-    def archived_music(self, seen, associations, assignments, bindings, rule_id):
+    def archived_music(self, seen, associations, assignments, bindings, rule_id, bound_only=False):
         """Replay known archived music only, even after its qB task/source was removed."""
         owned = {}
         for row in self.store.owned():
@@ -251,8 +273,7 @@ class Bridge40:
             )
             if rid is None or rule_id is not None and rid != rule_id:
                 continue
-            # Archived content must remain bound; do not revive old, unbound entries.
-            if key not in bindings and f"rule:{rid}" not in bindings:
+            if bound_only and key not in bindings and f"rule:{rid}" not in bindings:
                 continue
             rule = associations.rules.get(rid)
             files = []
@@ -299,9 +320,9 @@ class Bridge40:
                         ],
                         "rule_id": rid,
                         "association": evidence,
+                        "ab_metadata": self.rule_data(rule) if rule else {},
                         "rule_mapping": {
-                            "season": max(0, rule.season + rule.season_offset),
-                            "episode_offset": rule.episode_offset,
+                            k: self.rule_data(rule)[k] for k in ("season", "episode_offset")
                         }
                         if rule
                         else {},
@@ -369,10 +390,4 @@ class Bridge40:
             rule = await db.session.get(Bangumi, rule_id)
             if rule is None or rule.deleted:
                 raise ValueError("番剧不存在或已删除")
-            return {
-                "id": rule.id,
-                "title": rule.official_title,
-                "season": max(0, rule.season + rule.season_offset),
-                "episode_offset": rule.episode_offset,
-                "media_type": "movie" if rule.episode_type == "movie" else "tv",
-            }
+            return self.rule_data(rule)

@@ -154,6 +154,17 @@ class Store:
                 ),
             )
 
+    def completed(self, item):
+        """A committed success, distinct from a pre-publication ownership intent."""
+        with self.db() as c:
+            row = c.execute("SELECT * FROM files WHERE key=?", (item["key"],)).fetchone()
+        return bool(
+            row
+            and row["state"] == "linked"
+            and row["target"] == item["target"]
+            and json.loads(row["fingerprint"]) == item["fingerprint"]
+        )
+
     def files(self):
         with self.db() as c:
             return [dict(r) for r in c.execute("SELECT * FROM files ORDER BY updated DESC")]

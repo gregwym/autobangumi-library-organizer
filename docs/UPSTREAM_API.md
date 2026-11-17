@@ -127,3 +127,11 @@ Jellyfin 12.4 实机确认：生成清单用独立 Mixed 辅助索引库扫描�
 ### Shadow DOM 与弹窗焦点（0.7.2 兼容层）
 
 AB 4.0 的 Naive UI / Vueuc 焦点陷阱以 `mainEl.contains(getPreciseEventTarget(event))` 判断边界；插件双层 Shadow DOM 中的输入不满足 Node.contains，导致焦点立即跳回弹窗标签。上游应按 `event.composedPath().includes(mainEl)`（并正确处理 Tab 边界）判断，不应全局关闭焦点陷阱。插件临时仅对自身详情面板的 focus 事件，把 composedPath 的起点重定位到 AB 的 light-DOM slot；外部焦点事件不变，卸载时移除监听。参考 [Vueuc FocusTrap](https://github.com/07akioni/vueuc/blob/main/src/focus-trap/src/index.ts)。
+
+## 原生默认行为与可选纠错（0.8.0）
+
+完成任务只要有明确、未删除的 AB 归属，默认使用其 official_title、year、episode_type、season、season_offset 和 episode_offset；不再以 TMDB 绑定作为准入条件。AB 4.0 Bangumi 没有持久 TMDB ID，不能要求插件为了接替原生功能再让用户逐番搜索。显式 TMDB 覆盖仍有最高优先级，原有输出布局保持；切回 AB 模式只需保存空 ID，无需清理历史数据库或修改下载器。电影默认选体积最大的唯一正片候选；大小相同保持待确认。无法解析的多集单文件、小数集号和冲突仍待人工确认。
+
+正式 metadata API 应提供上述 AB 字段与 revision、有效季号计算、已确认的可选 provider IDs、文件解析结果。TMDB enrichment 是可选 provider，网络失败不能阻断其他 AB entry。原生重命名/硬链是自动完成默认；替换 organizer 同样必须默认处理未来新番，人工映射只作覆盖。有效设置优先级为任务覆盖 > 单番覆盖 > AB 元数据；单番 resources 范围始终约束任务覆盖。
+
+自动整理与手动补链须区分：已提交成功后用户删除的目标不自动重建；只写了发布意图而尚未成功的文件仍需恢复。当前插件以独立 SQLite 成功记录判断，不依赖 qB 标签。未来事件应有 restore_missing 语义，回放完成事件保持原生的不重建行为。自动开关升级后保持原值，开启时历史未绑定任务也会进入整理范围；维护页须明确提示这一点。

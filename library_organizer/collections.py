@@ -103,14 +103,15 @@ def update_collections(store, options, items, results):
     output = []
     for identity, group in sorted(groups.items()):
         safe_id = identity.replace(":", "-")
-        if not re.fullmatch(r"(?:tv|movie)-\d+", safe_id):
+        native = re.fullmatch(r"ab:(tv|movie):(.+)", identity)
+        if native:
+            directory = f"{clean(native[2])} [ab-{native[1]}] [boxset]"
+        elif re.fullmatch(r"(?:tv|movie)-\d+", safe_id):
+            directory = f"{clean(group['title'])} [ab-{safe_id}] [boxset]"
+        else:
             output.append({"state": "held", "detail": "音乐合集身份不明确，未生成清单"})
             continue
-        target = (
-            Path(options.collections_root)
-            / f"{clean(group['title'])} [ab-{safe_id}] [boxset]"
-            / "collection.xml"
-        )
+        target = Path(options.collections_root) / directory / "collection.xml"
         try:
             changed = publish_manifest(
                 store, options.collections_root, target, xml_bytes(group["title"], group["albums"])

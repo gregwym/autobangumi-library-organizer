@@ -107,6 +107,20 @@ class LibraryOrganizer(Plugin[Options]):
             except ValueError as e:
                 raise HTTPException(404, str(e)) from e
 
+        async def validate_mapping(mapping, task=None, rule=None):
+            try:
+                if mapping.tmdb_id:
+                    await self.bridge.metadata(mapping)
+                else:
+                    from .identity import from_ab
+
+                    from_ab(
+                        {**(task or {}), "rule_id": rule["id"], "ab_metadata": rule},
+                        mapping.model_dump(),
+                    )
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+
         def task_view(task):
             return {
                 "key": task["key"],
@@ -132,6 +146,13 @@ class LibraryOrganizer(Plugin[Options]):
             return {
                 "rule": rule,
                 "mapping": mapping,
+                "effective_mapping": mapping
+                or Mapping(
+                    media_type=rule["media_type"],
+                    season=rule["season"],
+                    episode_offset=rule["episode_offset"],
+                ).model_dump(),
+                "metadata_source": "tmdb" if mapping and mapping.get("tmdb_id") else "ab",
                 "active": self.store.get("active", False),
                 "automatic": self.store.get("automatic", False),
                 "results": result_rows(self.store.get(f"last_results:rule:{rid}", [])),
@@ -150,16 +171,17 @@ class LibraryOrganizer(Plugin[Options]):
         @router.post("/rules/{rid}/binding")
         async def rule_binding(rid: int, body: Mapping):
             rule = await require_rule(rid)
-            if body.episodes or body.main_file:
+            if body.episodes or body.specials or body.main_file:
                 raise HTTPException(422, "逐文件设置请保存在对应下载任务中")
             async with self.engine.lock:
                 body = body.model_copy(
-                    update={"season": rule["season"], "episode_offset": rule["episode_offset"]}
+                    update={
+                        "season": rule["season"],
+                        "episode_offset": rule["episode_offset"],
+                        "media_type": body.media_type if body.tmdb_id else rule["media_type"],
+                    }
                 )
-                try:
-                    await self.bridge.metadata(body)
-                except ValueError as e:
-                    raise HTTPException(422, str(e)) from e
+                await validate_mapping(body, rule=rule)
                 self.store.bind(f"rule:{rid}", {**body.model_dump(), "follow_ab": True})
             return {"saved": True}
 
@@ -183,7 +205,7 @@ class LibraryOrganizer(Plugin[Options]):
 
         @router.post("/rules/{rid}/tasks/{task_key}/binding")
         async def task_binding(rid: int, task_key: str, body: Mapping):
-            await require_rule(rid)
+            rule = await require_rule(rid)
             async with self.engine.lock:
                 tasks = await scan_tasks()
                 task = next(
@@ -197,15 +219,12 @@ class LibraryOrganizer(Plugin[Options]):
                     f["name"] for f in task["files"] if Path(f["name"]).suffix.lower() in VIDEO
                 }
                 if (
-                    not set(body.episodes) <= names
+                    not (body.episodes.keys() | body.specials.keys()) <= names
                     or body.main_file
                     and body.main_file not in names
                 ):
                     raise HTTPException(422, "文件映射不属于该下载任务")
-                try:
-                    await self.bridge.metadata(body)
-                except ValueError as e:
-                    raise HTTPException(422, str(e)) from e
+                await validate_mapping(body, task, rule)
                 self.store.bind(task_key, body.model_dump())
             return {"saved": True}
 
@@ -253,22 +272,24 @@ class LibraryOrganizer(Plugin[Options]):
                     raise HTTPException(404, "任务不存在，请重新扫描")
                 if body.rule_id is not None and task["rule_id"] != body.rule_id:
                     raise HTTPException(409, "规则关联已变化")
-                try:
-                    await self.bridge.metadata(body.mapping)
-                except ValueError as e:
-                    raise HTTPException(422, str(e)) from e
+                rule = await require_rule(task["rule_id"]) if task["rule_id"] is not None else None
+                if not body.mapping.tmdb_id and rule is None:
+                    raise HTTPException(422, "请先将下载任务关联到 AB 番剧")
+                await validate_mapping(body.mapping, task, rule)
                 from .planner import VIDEO
 
                 names = {
                     f["name"] for f in task["files"] if Path(f["name"]).suffix.lower() in VIDEO
                 }
                 if (
-                    not set(body.mapping.episodes) <= names
+                    not (body.mapping.episodes.keys() | body.mapping.specials.keys()) <= names
                     or body.mapping.main_file
                     and body.mapping.main_file not in names
                 ):
                     raise HTTPException(422, "文件覆盖映射必须使用完整源文件名")
-                if body.rule_id is not None and (body.mapping.episodes or body.mapping.main_file):
+                if body.rule_id is not None and (
+                    body.mapping.episodes or body.mapping.specials or body.mapping.main_file
+                ):
                     raise HTTPException(422, "逐文件映射仅适用于当前任务，不能应用到未来任务")
                 self.store.bind(
                     "rule:" + str(body.rule_id) if body.rule_id is not None else body.task_key,

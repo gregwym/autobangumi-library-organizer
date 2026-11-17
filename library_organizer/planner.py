@@ -1,4 +1,4 @@
-"""Pure, conservative planning; TMDB supplies identities, never a guessed season."""
+"""Pure planning using AB metadata by default, with optional TMDB corrections."""
 
 import hashlib
 import re
@@ -164,7 +164,9 @@ def task_key(instance, task_id):
 def build(task, mapping, metadata, options):
     title = clean(metadata["title"])
     year = metadata.get("year", "")
-    base = clean(f"{title} ({year})" if year else title) + f" [tmdbid-{mapping.tmdb_id}]"
+    base = clean(f"{title} ({year})" if year else title)
+    if mapping.tmdb_id:
+        base += f" [tmdbid-{mapping.tmdb_id}]"
     root = Path(options.library_root)
     folder = (
         root
@@ -195,6 +197,13 @@ def build(task, mapping, metadata, options):
     source_episodes = {}
     if mapping.media_type == "movie" and not main and len(media) == 1:
         main = media[0]["name"]
+    elif mapping.media_type == "movie" and not main and mapping.tmdb_id is None and media:
+        # AB chooses the largest movie candidate. Require an unambiguous size
+        # rather than let downloader iteration order decide equal-size ties.
+        largest = max(f.get("size", 0) for f in media)
+        candidates = [f for f in media if f.get("size", 0) == largest]
+        if largest > 0 and len(candidates) == 1:
+            main = candidates[0]["name"]
     for f in task["files"]:
         name = f["name"]
         kind = classify(name)
@@ -224,7 +233,7 @@ def build(task, mapping, metadata, options):
         values = dict(
             title=title,
             year=year,
-            tmdb_id=mapping.tmdb_id,
+            tmdb_id=mapping.tmdb_id or 0,
             season=mapping.season,
             episode=0,
             group=v,
@@ -270,8 +279,16 @@ def build(task, mapping, metadata, options):
                         # Same zero/non-positive safeguards as AB's native renamer.
                         if ep != 0 and adjusted > 0:
                             ep = adjusted
-                if ep is None or ep not in metadata.get("specials" if special else "episodes", []):
-                    item["reason"] = item["reason"] or "无法对应 TMDB 集数，请在文件映射中确认"
+                if (
+                    ep is None
+                    or mapping.tmdb_id
+                    and ep not in metadata.get("specials" if special else "episodes", [])
+                ):
+                    item["reason"] = item["reason"] or (
+                        "无法对应 TMDB 集数，请在文件映射中确认"
+                        if mapping.tmdb_id
+                        else "无法确定集号，请在文件映射中确认"
+                    )
                 else:
                     target = (
                         folder
@@ -415,7 +432,12 @@ def build(task, mapping, metadata, options):
                 parent.parent if re.fullmatch(r"(?i)(?:disc|cd)[ _-]*\d+", parent.name) else parent
             )
         item["album_target"] = str(album)
-        item["collection"] = {"key": f"{mapping.media_type}:{mapping.tmdb_id}", "title": title}
+        item["collection"] = {
+            "key": f"{mapping.media_type}:{mapping.tmdb_id}"
+            if mapping.tmdb_id
+            else f"ab:{mapping.media_type}:{base}",
+            "title": title,
+        }
         item.pop("music_tags", None)
     # Only explicit cover/lyrics files accompany music; booklet scans stay archived.
     music = {
