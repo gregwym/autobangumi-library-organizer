@@ -55,7 +55,7 @@
 
 扫描清单的库保留本地 XML 读取，将 MetadataSavers 设为 []，由插件维护 XML、Jellyfin 只读导入。AB 与 Jellyfin 的音乐容器路径目前一致：`/media/anime cds`。合集 XML 引用的是 Jellyfin 可见的绝对专辑路径，不是 NAS 主机路径。
 
-依赖关系是“专辑先入索引，合集再关联专辑”，不是“目录名 albums 按字母先于 collections 就保证先扫描”。首次或大规模路径迁移应等全库扫描完成，必要时刷新合集，再确认成员。后续由目录监控和 Jellyfin 定时扫描导入；插件不调用媒体服务器 API。
+依赖关系是“专辑先入索引，合集再关联专辑”，不是“目录名 albums 按字母先于 collections 就保证先扫描”。上游 BaseItem.GetLinkedChild 会把尚未找到的关联项缓存为 Guid.Empty；不能假设后续专辑出现就立即重新解析。首次或大规模路径迁移应等全库扫描完成，再刷新合集元数据确认成员。后续由目录监控和 Jellyfin 定时扫描导入；插件不调用媒体服务器 API。增量文件整理与媒体服务器完成合集关联是两件事，合并扫描方案还必须验证“新增专辑后合集更新”的顺序和缓存行为。
 
 目标服务器实测基线为 18 个 MusicAlbum、197 首 Audio、1 个音乐 BoxSet，含 18 个专辑成员。共同父目录方案尚未在目标服务器切换，不能据此宣称辅助库已移除。
 
@@ -65,7 +65,7 @@ Jellyfin 上游对外部合集成员取并集：新增路径可以导入，删�
 
 BoxSet 的关联成员可以是剧集 Series、电影 Movie 或专辑 MusicAlbum；因此可用一份作品合集清单，链接整部动画及相关专辑，无需把两类文件搬到同一目录。当前插件只生成音乐成员，动画成员尚未实现。
 
-当前路径差异必须先解决：视频在 AB 是 `/library`，Jellyfin 是 `/media/bangumi`；音乐两边是 `/media/anime cds`。清单不能直接写入 AB 的 `/library`。后续方案应明确文件系统路径约定，不给整理插件加入 Jellyfin API 凭据，也不猜测媒体服务器挂载。对于用户从音乐库进入的合集，其包含动画的呈现还应在目标客户端验证。
+当前路径差异必须先解决：视频在 AB 是 `/library`，Jellyfin 是 `/media/bangumi`；音乐两边是 `/media/anime cds`。清单不能直接写入 AB 的 `/library`。上游支持把相对路径按合集目录解析，但当前两个容器的目录拓扑不同，直接按 AB 路径计算相对位置也不成立。后续方案应明确文件系统路径约定，不给整理插件加入 Jellyfin API 凭据，也不猜测媒体服务器挂载。对于用户从音乐库进入的合集，其包含动画的呈现还应在目标客户端验证。
 
 音乐库的“合集”入口按成员所属库筛选；全局“合集”页仍可能同时展示电影和音乐合集。合并扫描根不能把全局合集页变成仅音乐页面。
 
@@ -78,3 +78,4 @@ BoxSet 的关联成员可以是剧集 Series、电影 Movie 或专辑 MusicAlbum
 - [BoxSet XML provider](https://github.com/jellyfin/jellyfin/blob/master/MediaBrowser.LocalMetadata/Providers/BoxSetXmlProvider.cs)
 - [BoxSet linked children 与递归](https://github.com/jellyfin/jellyfin/blob/master/MediaBrowser.Controller/Entities/Movies/BoxSet.cs)
 - [外部合集元数据合并](https://github.com/jellyfin/jellyfin/blob/master/MediaBrowser.Providers/BoxSets/BoxSetMetadataService.cs)
+- [关联路径解析及未匹配缓存](https://github.com/jellyfin/jellyfin/blob/master/MediaBrowser.Controller/Entities/BaseItem.cs)
