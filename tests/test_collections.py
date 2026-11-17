@@ -5,7 +5,7 @@ import pytest
 from test_planning import fixture
 from test_resources import flac, plan
 
-from library_organizer.collections import publish_manifest, update_collections
+from library_organizer.collections import publish_manifest, reference_path, update_collections
 from library_organizer.models import Options
 from library_organizer.planner import fingerprint
 from library_organizer.store import Store
@@ -147,6 +147,156 @@ def test_configuration_has_no_media_server_context():
     assert not any("jellyfin" in key for key in Options.model_fields)
     with pytest.raises(ValueError):
         Options(music_root="/music", collections_root="/music/collections")
+
+
+def test_reference_paths_are_boundary_aware_and_longest_prefix_wins():
+    opts = Options(
+        collections_root="/collections",
+        collection_path_map=[
+            {"local": "/library", "remote": "/media/bangumi"},
+            {"local": "/library/Movies", "remote": "/media/movies"},
+        ],
+    )
+    assert reference_path(opts, "/library/Show") == "/media/bangumi/Show"
+    assert reference_path(opts, "/library/Movies/Film") == "/media/movies/Film"
+    assert reference_path(opts, "/library-other/Show") == "/library-other/Show"
+    for mappings in (
+        [{"local": "/library/../other", "remote": "/media"}],
+        [{"local": "/library", "remote": "relative"}],
+        [{"local": "/library", "remote": "/a"}, {"local": "/library/", "remote": "/b"}],
+    ):
+        with pytest.raises(ValueError):
+            Options(collection_path_map=mappings)
+
+
+def test_legacy_video_history_and_albums_form_one_incremental_collection(tmp_path):
+    opts = Options(
+        source_root=str(tmp_path / "src"),
+        library_root=str(tmp_path / "video"),
+        music_root=str(tmp_path / "music"),
+        collections_root=str(tmp_path / "collections"),
+        collection_path_map=[{"local": str(tmp_path / "video"), "remote": "/media/anime"}],
+    )
+    Path(opts.collections_root).mkdir()
+    store = Store(tmp_path / "state.db")
+
+    def output(key, path, **fields):
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(key.encode())
+        item = dict(
+            key=key,
+            source="/downloads/" + key,
+            target=str(target),
+            fingerprint=fingerprint(target),
+            **fields,
+        )
+        store.claim(item)
+        store.record(item, "linked")
+        return item
+
+    folder = Path(opts.library_root) / "Show (2020) [tmdbid-9]"
+    a = output(
+        "a",
+        folder / "Season 01" / "Show S01E01.mkv",
+        identity={"media_type": "tv", "tmdb_id": 9},
+        rule_id=1,
+    )
+    b = output(
+        "b",
+        folder / "Season 03" / "Show S03E01.mkv",
+        identity={"media_type": "tv", "tmdb_id": 9},
+        rule_id=2,
+    )
+    pending = output(
+        "pending",
+        Path(opts.library_root) / "Other" / "Season 01" / "S01E01.mkv",
+        identity={"media_type": "tv", "tmdb_id": 9},
+    )
+    store.record(pending, "failed")  # A durable claim without a success is not enough.
+    store.set("last_items", [a, b, pending])
+    assert update_collections(store, opts, [], []) == []  # No one-member video-only collection.
+    before = {i["target"]: fingerprint(Path(i["target"])) for i in (a, b)}
+    album = Path(opts.music_root) / "Show" / "OST"
+    music = output(
+        "m", album / "01.flac", album_target=str(album), collection={"key": "tv:9", "title": "Show"}
+    )
+    # Exercise the upgrade from the pre-0.9 membership format.
+    store.set("collection_members", None)
+    store.set(
+        "music_members",
+        {
+            "m": {
+                "target": music["target"],
+                "album": str(album),
+                "collection": music["collection"],
+            }
+        },
+    )
+    result = update_collections(store, opts, [], [])
+    manifest = Path(result[0]["target"])
+    paths = [n.text for n in ET.parse(manifest).findall("./CollectionItems/CollectionItem/Path")]
+    assert paths == sorted(["/media/anime/Show (2020) [tmdbid-9]", str(album)])
+    assert result[0]["series"] == 1 and result[0]["albums"] == 1
+    stamp = manifest.stat().st_mtime_ns
+    # Removing a downloader task does not remove already-published members.
+    store.set("last_items", [])
+    assert update_collections(store, opts, [], [])[0]["state"] == "exists"
+    assert manifest.stat().st_mtime_ns == stamp
+    assert before == {i["target"]: fingerprint(Path(i["target"])) for i in (a, b)}
+    # A failed/held new download must not contribute a directory.
+    bad = output(
+        "bad",
+        Path(opts.music_root) / "Not ready" / "01.flac",
+        album_target=str(Path(opts.music_root) / "Not ready"),
+        collection=music["collection"],
+    )
+    update_collections(store, opts, [bad], [{"state": "held"}])
+    assert manifest.stat().st_mtime_ns == stamp
+    # A future successful download updates XML only; no re-copy of previous outputs.
+    update_collections(store, opts, [bad], [{"state": "linked"}])
+    assert len(ET.parse(manifest).findall("./CollectionItems/CollectionItem/Path")) == 3
+
+
+def test_movie_member_and_modified_video_are_checked(tmp_path):
+    opts = Options(
+        source_root=str(tmp_path / "src"),
+        library_root=str(tmp_path / "video"),
+        music_root=str(tmp_path / "music"),
+        collections_root=str(tmp_path / "collections"),
+    )
+    Path(opts.collections_root).mkdir()
+    store = Store(tmp_path / "state.db")
+    collection = {"key": "movie:1", "title": "Film"}
+    folder = Path(opts.library_root) / "Movies" / "Film"
+    video = folder / "Film.mkv"
+    album = Path(opts.music_root) / "Film" / "OST"
+    track = album / "01.flac"
+    items = []
+    for key, target, fields in [
+        (
+            "v",
+            video,
+            {"identity": {"media_type": "movie", "tmdb_id": 1}, "collection_target": str(folder)},
+        ),
+        ("m", track, {"album_target": str(album)}),
+    ]:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(key.encode())
+        item = dict(
+            key=key,
+            target=str(target),
+            fingerprint=fingerprint(target),
+            collection=collection,
+            **fields,
+        )
+        store.claim(item)
+        items.append(item)
+    result = update_collections(store, opts, items, [{"state": "exists"}] * 2)
+    assert result[0]["movies"] == 1 and result[0]["series"] == 0
+    video.write_bytes(b"user changed video")
+    result = update_collections(store, opts, [], [])
+    assert result[0]["movies"] == 0 and result[0]["albums"] == 1
 
 
 def test_upgrade_removes_only_organizer_legacy_credentials(tmp_path):

@@ -87,7 +87,7 @@ class Engine:
         return self.store
 
     def settings_digest(self):
-        return digest({"layout": 6, "options": self.options.model_dump()})
+        return digest({"layout": 7, "options": self.options.model_dump()})
 
     def ownership(self, item, target):
         return next((r for r in self.store.owned(item["key"]) if r["target"] == str(target)), None)
@@ -403,6 +403,14 @@ class Engine:
             )
             self.store.set("collection_results", collections)
             return {"results": results, "backup": backup, "collections": collections}
+
+    async def refresh_collections(self):
+        """Rebuild associations from successful history without reprocessing media."""
+        async with self.replay_lock, self.lock:
+            backup = str(self.store.backup())
+            results = await asyncio.to_thread(update_collections, self.store, self.options, [], [])
+            self.store.set("collection_results", results)
+            return {"collections": results, "backup": backup}
 
     async def tick(self):
         if not self.store.get("active", False) or not self.store.get("automatic", False):

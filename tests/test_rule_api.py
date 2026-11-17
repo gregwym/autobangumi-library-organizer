@@ -55,6 +55,17 @@ async def test_rule_can_be_configured_before_any_download(api):
         assert (await client.post("/rules/1/scan")).json() == {"tasks": [], "unassigned": []}
 
 
+async def test_collection_refresh_does_not_scan_or_reorganize_media(api):
+    obj, task, client = api
+    async with client:
+        response = await client.post("/collections/refresh")
+    assert response.status_code == 200 and response.json()["collections"] == []
+    assert response.json()["backup"]
+    obj.bridge.scan.assert_not_awaited()
+    obj.bridge.metadata.assert_not_awaited()
+    assert not obj.store.files()
+
+
 async def test_task_scope_cannot_modify_another_show(api):
     obj, task, client = api
     async with client:

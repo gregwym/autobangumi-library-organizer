@@ -55,12 +55,13 @@ class Settings extends Panel {
   connectedCallback() {
     this.mount(`<details open><summary>媒体库整理 · 全局设置</summary><div class="body">
       <p>下载根目录、视频库、可选音乐库、版本后缀和合集清单目录在插件配置中统一设置。优先硬链，不支持时依次尝试 Reflink、普通复制（占用额外空间）。</p>
-      <p class="muted">音乐库留空时先归档；配置后自动补整理已归档音乐。专辑与合集清单均须纳入媒体服务器扫描，两个容器内的音乐路径须相同。插件不持有媒体服务器 API 凭据。字体、扫描图和其他附件保留原目录归档。</p><p class="muted">每部番的元数据覆盖、季集映射和整理预览，请到「番剧详情 → 媒体库」。</p>
+      <p class="muted">音乐库留空时先归档；配置后自动补整理已归档音乐。作品合集自动关联已入库的动画和专辑；清单目录单独扫描，容器路径不同时填写「合集引用路径映射」。插件不持有媒体服务器 API 凭据。字体、扫描图和其他附件保留原目录归档。</p><p class="muted">每部番的元数据覆盖、季集映射和整理预览，请到「番剧详情 → 媒体库」。</p>
       <div class="row"><span id="state" class="badge"></span><button id="activate">接管整理</button></div>
       <label><input id="automatic" type="checkbox">自动整理下载完成的番剧</label>
       <small>默认沿用 AB 的标题、年份、类型与季集偏移，无需逐番绑定。每分钟检查完成的下载并补整理历史资源；已手动删除的入库文件只在手动整理时补链。关闭后仍可在番剧详情手动整理。</small>
       <p class="muted">接管会备份配置并关闭原生整理与硬链。下载文件保留原名，停用自动整理不会删除已建链接。</p>
-      <div class="row"><button id="status">刷新状态</button></div>
+      <div class="row"><button id="status">刷新状态</button><button id="collections">更新作品合集</button></div>
+      <small>更新合集只校验已有整理记录并重建清单，不移动或重新复制媒体文件。新下载整理成功后自动更新。</small>
       ${progressMarkup}<div id="message" role="status"></div>
       <div class="row"><span id="version"></span><button id="check">检查更新</button><button id="update" hidden></button></div>
       <small>每 6 小时检查新版，点击一次更新；更新前备份，启动失败恢复旧代码。</small>
@@ -74,6 +75,10 @@ class Settings extends Panel {
       finally {await this.status();}
     });
     this.action('status',()=>this.status());
+    this.action('collections',async()=>{
+      const r=await this.host.api.post('collections/refresh',{});
+      this.message((r.collections||[]).map(x=>x.detail).join('\n')||'暂无可生成的作品合集。');
+    });
     this.action('check',async()=>this.updateStatus(await this.host.api.post('update/check',{})));
     this.action('update',async()=>{
       this.message('正在备份并更新…');

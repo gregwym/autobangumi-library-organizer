@@ -209,7 +209,12 @@ async def test_default_music_and_collection_share_ab_identity_across_entries(sco
     albums = [
         n.text for n in ET.parse(manifest[0]).findall("./CollectionItems/CollectionItem/Path")
     ]
-    assert len(albums) == 2
-    assert all(str(music / "Show") in album and "tmdbid" not in album for album in albums)
+    assert len(albums) == 3
+    assert (
+        str(Path(x.engine.options.library_root) / x.engine.options.tv_subdirectory / "Show")
+        in albums
+    )
+    assert len([p for p in albums if str(music / "Show") in p]) == 2
+    assert all("tmdbid" not in p for p in albums)
     assert all(any(os.path.samefile(src, r["target"]) for r in x.store.files()) for src in sources)
     x.bridge.metadata.assert_not_awaited()

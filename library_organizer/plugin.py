@@ -326,6 +326,10 @@ class LibraryOrganizer(Plugin[Options]):
                 self.store.set("automatic_signature", None)
             return {"automatic": body.enabled}
 
+        @router.post("/collections/refresh")
+        async def refresh_collections():
+            return await self.engine.refresh_collections()
+
         @router.get("/update")
         async def update_status():
             return self.updater.status()

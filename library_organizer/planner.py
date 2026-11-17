@@ -167,6 +167,12 @@ def build(task, mapping, metadata, options):
     base = clean(f"{title} ({year})" if year else title)
     if mapping.tmdb_id:
         base += f" [tmdbid-{mapping.tmdb_id}]"
+    collection = {
+        "key": f"{mapping.media_type}:{mapping.tmdb_id}"
+        if mapping.tmdb_id
+        else f"ab:{mapping.media_type}:{base}",
+        "title": title,
+    }
     root = Path(options.library_root)
     folder = (
         root
@@ -319,6 +325,10 @@ def build(task, mapping, metadata, options):
                 target = extras_folder / kind / clean(Path(name).name)
         if target:
             item["target"] = str(target)
+            if item["identity"]:
+                # Link the Series/Movie directory, never individual episodes or extras.
+                item["collection"] = collection
+                item["collection_target"] = str(folder)
         entries.append(item)
         if suffix in VIDEO and target:
             videos[name] = str(target)
@@ -432,12 +442,8 @@ def build(task, mapping, metadata, options):
                 parent.parent if re.fullmatch(r"(?i)(?:disc|cd)[ _-]*\d+", parent.name) else parent
             )
         item["album_target"] = str(album)
-        item["collection"] = {
-            "key": f"{mapping.media_type}:{mapping.tmdb_id}"
-            if mapping.tmdb_id
-            else f"ab:{mapping.media_type}:{base}",
-            "title": title,
-        }
+        item["collection"] = collection
+        item["collection_target"] = str(album)
         item.pop("music_tags", None)
     # Only explicit cover/lyrics files accompany music; booklet scans stay archived.
     music = {

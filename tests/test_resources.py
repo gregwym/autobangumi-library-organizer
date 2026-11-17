@@ -175,7 +175,8 @@ async def test_legacy_music_hash_migrates_manifest_and_incremental_tracks(
         assert marker.read_text() == "user data"
     manifest = next(collections.rglob("collection.xml"))
     paths = [p.text for p in ET.parse(manifest).findall(".//CollectionItem/Path")]
-    assert paths == [str(track.parent)]
+    series = next(Path(i["target"]).parent.parent for i in preview["items"] if i.get("identity"))
+    assert paths == sorted([str(series), str(track.parent)])
     # A later completed download goes directly into the same album, without a hash.
     path = x.root / "a/CDs/Album/02.flac"
     path.write_bytes(b"new track")

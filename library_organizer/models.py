@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from string import Formatter
 from typing import Literal
 
@@ -9,6 +9,19 @@ class PathMap(BaseModel):
     downloader: str = "default"
     remote: str
     local: str
+
+
+class CollectionPathMap(BaseModel):
+    local: str = Field(title="AB 内路径前缀")
+    remote: str = Field(title="清单读取方的路径前缀")
+
+    @field_validator("local", "remote")
+    @classmethod
+    def absolute_path(cls, value):
+        path = PurePosixPath(value)
+        if not path.is_absolute() or ".." in path.parts or any(c in value for c in "\\\x00\r\n"):
+            raise ValueError("合集路径映射须使用不含上级目录的绝对路径")
+        return str(path)
 
 
 class Options(BaseModel):
@@ -45,8 +58,13 @@ class Options(BaseModel):
     )
     collections_root: str = Field(
         default="",
-        title="音乐合集清单目录（可选）",
-        description="生成 collection.xml，清单与专辑都须在媒体服务器扫描范围内。输出目录须与音乐、视频、下载目录互不包含；两容器内的音乐路径须一致。不连接媒体服务器 API。",
+        title="作品合集清单目录（可选）",
+        description="自动关联 AB 已整理的动画和专辑，生成 collection.xml。清单须单独扫描，不能放进实际专辑或剧集目录。不连接媒体服务器 API。",
+    )
+    collection_path_map: list[CollectionPathMap] = Field(
+        default_factory=list,
+        title="合集引用路径映射（可选）",
+        description="仅转换 XML 中的路径，不移动文件。例如 AB 的 /library 对应读取方的 /media/bangumi；同路径无需配置。按完整目录前缀匹配，最长前缀优先。",
     )
 
     @field_validator("tv_subdirectory", "movie_subdirectory")
@@ -94,17 +112,20 @@ class Options(BaseModel):
                 raise ValueError("音乐库必须与下载和视频库目录分开，不能重叠")
         if self.collections_root:
             collection = Path(self.collections_root)
-            if not self.music_root or not collection.is_absolute():
-                raise ValueError("合集目录须为绝对路径，且须先配置音乐库")
+            if not collection.is_absolute():
+                raise ValueError("合集目录须为绝对路径")
             collection = collection.resolve()
             if any(
                 collection == root or collection in root.parents or root in collection.parents
-                for root in (a, b, Path(self.music_root).resolve())
+                for root in (a, b, *([Path(self.music_root).resolve()] if self.music_root else []))
             ):
                 raise ValueError("合集目录不能与下载、视频库、音乐库重叠")
         for m in self.path_map:
             if not Path(m.remote).is_absolute() or not Path(m.local).is_absolute():
                 raise ValueError("路径映射必须使用绝对路径")
+        prefixes = [m.local for m in self.collection_path_map]
+        if len(prefixes) != len(set(prefixes)):
+            raise ValueError("合集路径映射的 AB 路径前缀不能重复")
         return self
 
 
