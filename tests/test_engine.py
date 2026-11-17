@@ -1,5 +1,7 @@
+import asyncio
 import errno
 import os
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -59,6 +61,51 @@ async def test_real_hardlink_idempotence_and_preview_replay(env):
     p = await engine.preview()
     await engine.apply(p["token"])
     assert os.path.samefile(src, dst)
+
+
+async def test_progress_is_readable_during_copy_and_survives_page_reload(env, monkeypatch):
+    e, task, src = env
+    plan = await e.preview(rule_id=1)
+    entered, resume = threading.Event(), threading.Event()
+    original = e.link
+
+    def blocked(item):
+        entered.set()
+        assert resume.wait(5)
+        return original(item)
+
+    monkeypatch.setattr(e, "link", blocked)
+    applying = asyncio.create_task(e.apply(plan["token"], rule_id=1))
+    try:
+        assert await asyncio.to_thread(entered.wait, 5)
+        p = e.progress(1)
+        assert p["state"] == "running" and p["completed"] == 0 and p["total"] == 1
+        assert p["current"] == src.name
+        assert e.progress(2) is None
+        p["counts"]["copy"] = 99
+        assert not e.progress(1)["counts"]
+    finally:
+        resume.set()
+    await applying
+    p = e.progress(1)
+    assert p["state"] == "completed" and p["completed"] == 1
+    assert p["counts"] == {"hardlink": 1}
+    assert Engine(e.store, e.bridge, e.options).progress(1) == p
+
+
+async def test_interrupted_progress_is_not_reported_as_running(env, monkeypatch):
+    e, task, src = env
+    plan = await e.preview()
+
+    def crash(item):
+        raise RuntimeError("unexpected failure")
+
+    monkeypatch.setattr(e, "link", crash)
+    with pytest.raises(RuntimeError):
+        await e.apply(plan["token"])
+    assert e.progress()["state"] == "interrupted"
+    e.store.set("progress", {**e.progress(), "state": "running"})
+    assert Engine(e.store, e.bridge, e.options).progress()["state"] == "interrupted"
 
 
 async def test_mapping_change_rebuilds_owned_links_only(env):

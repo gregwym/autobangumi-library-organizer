@@ -1,4 +1,5 @@
 const css=`:host{display:block;font:14px/1.5 var(--ab-font-family,system-ui);color:var(--ab-color-text,#222)}*{box-sizing:border-box}details{border:1px solid var(--ab-color-border,#ddd);border-radius:var(--ab-radius-md,8px);overflow:hidden}summary{padding:7px 14px;font-weight:600;cursor:pointer;color:var(--ab-color-text-secondary,#666)}.body{padding:14px;background:var(--ab-color-surface,#fff);border-top:1px solid var(--ab-color-border,#ddd)}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}input,select,button,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--ab-color-border,#aaa);border-radius:6px;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.primary{background:var(--ab-color-primary,#5274d9);color:white}label{display:grid;gap:5px;margin:8px 0}label:has(input[type=checkbox]){display:flex;align-items:center;gap:8px}input[type=checkbox]{width:auto;margin:0;accent-color:var(--ab-color-primary,#526fe4)}select,textarea{max-width:100%;width:100%}textarea{min-height:70px}small,.muted{color:var(--ab-color-text-secondary,#777)}.plan{max-height:400px;overflow:auto}.item{border-bottom:1px solid var(--ab-color-border,#ddd);padding:9px 0;overflow-wrap:anywhere}#message{white-space:pre-wrap;margin-top:10px}.badge{border-radius:999px;padding:2px 9px;background:#8882}.error{color:#c65540}[hidden]{display:none!important}`;
+const progressMarkup = `<section id="progress-panel" hidden aria-live="polite"><p id="progress-label"></p><progress aria-label="文件整理进度" id="progress-bar" max="1" value="0" style="width:100%;accent-color:var(--ab-color-primary,#5274d9)"></progress><p id="progress-current" class="muted" style="overflow-wrap:anywhere"></p><small id="progress-counts"></small></section>`;
 const stateNames = {linked:'已整理',exists:'已有链接',held:'待确认',failed:'失败'};
 function summary(rows) {
   const counts={}; for(const r of rows){const key=r.state==='linked'&&r.method?({hardlink:'硬链',reflink:'Reflink',copy:'普通复制'}[r.method]||r.state):r.state;counts[key]=(counts[key]||0)+1;}
@@ -9,6 +10,30 @@ class Panel extends HTMLElement {
     if(!this.shadowRoot)this.attachShadow({mode:'open'});
     this.shadowRoot.innerHTML=`<style>${css}</style>${body}`;
     this.$=id=>this.shadowRoot.getElementById(id);
+  }
+  watchProgress(ruleId) {
+    clearTimeout(this.progressTimer);
+    const poll=async()=>{
+      if(!this.isConnected)return;
+      try {
+        const p=await this.host.api.get('progress'+(ruleId?'?rule_id='+ruleId:''));
+        this.renderProgress(p);
+      } catch {if(this.$('progress-current'))this.$('progress-current').textContent='暂时无法读取进度，正在重试…';}
+      if(this.isConnected)this.progressTimer=setTimeout(poll,2000);
+    };
+    poll();
+  }
+  disconnectedCallback() {clearTimeout(this.progressTimer);}
+  renderProgress(p) {
+    this.$('progress-panel').hidden=!p;if(!p)return;
+    const labels={running:'正在整理',completed:'文件处理完成',interrupted:'整理已中断，请重新预览后继续'};
+    const prefix=this.rid&&p.rule_id===null?'全局任务 · ':'';
+    this.$('progress-label').textContent=prefix+labels[p.state]+(p.state==='interrupted'?'':` · ${p.completed} / ${p.total} 个文件`);
+    this.$('progress-bar').max=p.total||1;this.$('progress-bar').value=p.completed;
+    this.$('progress-bar').hidden=p.state==='interrupted';
+    this.$('progress-current').textContent=p.current?'当前：'+p.current:'';
+    const names={hardlink:'硬链',reflink:'Reflink',copy:'普通复制',exists:'已存在',held:'待确认',failed:'失败'};
+    this.$('progress-counts').textContent=Object.entries(p.counts).map(([k,n])=>`${names[k]||k} ${n}`).join(' · ');
   }
   message(text,error=false) {this.$('message').textContent=text;this.$('message').className=error?'error':'';}
   action(id,fn) {this.$(id).onclick=()=>this.run(fn);}
@@ -36,7 +61,7 @@ class Settings extends Panel {
       <small>开启后每分钟检查完成的下载，包括已绑定但尚未整理的旧下载。关闭后仍可在番剧详情手动预览、整理。</small>
       <p class="muted">接管会备份配置并关闭原生整理与硬链。下载文件保留原名，停用自动整理不会删除已建链接。</p>
       <div class="row"><button id="status">刷新状态</button><button id="refresh">刷新 Jellyfin</button></div>
-      <div id="message" role="status"></div>
+      ${progressMarkup}<div id="message" role="status"></div>
       <div class="row"><span id="version"></span><button id="check">检查更新</button><button id="update" hidden></button></div>
       <small>每 6 小时检查新版，点击一次更新；更新前备份，启动失败恢复旧代码。</small>
     </div></details>`);
@@ -55,7 +80,7 @@ class Settings extends Panel {
       this.message('正在备份并更新…');
       await this.host.api.post('update/install',{version:this.latest});window.location.reload();
     });
-    this.run(()=>this.status());
+    this.run(()=>this.status());this.watchProgress();
   }
   async status() {
     const s=await this.host.api.get('status');
@@ -95,7 +120,7 @@ class Detail extends Panel {
         <select id="unassigned"></select><div class="row"><button id="assign">关联到本番</button></div>
       </div></details>
       <div class="row"><button id="preview">预览本番整理计划</button><button id="apply" class="primary" disabled>执行此计划</button><button id="verify">核对 Jellyfin 识别</button></div>
-      <div id="plan" class="plan"></div><details id="result-panel" hidden><summary>上次整理明细</summary><div id="results" class="body plan"></div></details><div id="message" role="status"></div>`);
+      <div id="plan" class="plan"></div><details id="result-panel" hidden><summary>上次整理明细</summary><div id="results" class="body plan"></div></details>${progressMarkup}<div id="message" role="status"></div>`);
     for(const id of ['type','query','tmdb'])this.$(id).oninput=()=>{this.dirty=true;this.invalidate();};
     this.action('search',async()=>{
       const rows=await this.host.api.get(`search?query=${encodeURIComponent(this.$('query').value)}&kind=${this.$('type').value}`);
@@ -137,7 +162,7 @@ class Detail extends Panel {
       this.message(`仅当前番：${p.linkable} 个可整理，${p.held} 个待确认。`);
     });
     this.action('apply',async()=>{
-      const token=this.token;this.invalidate();
+      const token=this.token;this.invalidate();this.message('正在核对下载和配置，随后开始整理…');
       const r=await this.host.api.post(`rules/${this.rid}/apply`,{token});
       this.renderResults(r.results);this.message(summary(r.results)+'\n'+r.jellyfin+'\n'+r.results.filter(x=>x.state==='failed').map(x=>x.detail).join('\n'));
     });
@@ -145,7 +170,7 @@ class Detail extends Panel {
       const rows=await this.host.api.post(`rules/${this.rid}/jellyfin/verify`,{});
       this.message(rows.length?rows.map(r=>`${r.state} · ${r.path} · ${r.detail}`).join('\n'):'本番暂无已执行的正片映射可核对。');
     });
-    this.run(async()=>{if(!Number.isInteger(this.rid)||this.rid<1)throw new Error('无法确定当前番剧');await this.loadRule();});
+    this.run(async()=>{if(!Number.isInteger(this.rid)||this.rid<1)throw new Error('无法确定当前番剧');await this.loadRule();});this.watchProgress(this.rid);
   }
   mappingForm() {return {media_type:this.$('type').value,tmdb_id:Number(this.$('tmdb').value),season:this.abRule?.season??1,episode_offset:this.abRule?.episode_offset??0,episodes:{},main_file:null};}
   invalidate() {this.token=null;if(this.$('apply'))this.$('apply').disabled=true;}

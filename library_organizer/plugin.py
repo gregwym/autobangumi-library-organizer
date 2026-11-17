@@ -49,6 +49,10 @@ class LibraryOrganizer(Plugin[Options]):
     def api(self):
         router = APIRouter()
 
+        @router.get("/progress")
+        async def progress(rule_id: int | None = None):
+            return self.engine.progress(rule_id)
+
         async def scan_tasks():
             try:
                 return await self.bridge.scan()

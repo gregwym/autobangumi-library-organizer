@@ -3,6 +3,7 @@ import hashlib
 import json
 import os
 import secrets
+import time
 
 from .models import Mapping
 from .planner import build, contained, fingerprint
@@ -20,6 +21,49 @@ class Engine:
         self.store, self.bridge, self.options = store, bridge, options
         self.lock = asyncio.Lock()
         self.replay_lock = asyncio.Lock()
+        self._progress = self.store.get("progress")
+        if self._progress and self._progress["state"] == "running":
+            self._progress = {**self._progress, "state": "interrupted", "current": ""}
+
+    def progress(self, rule_id=None):
+        value = self._progress
+        if value and (rule_id is None or value["rule_id"] in (None, rule_id)):
+            return {**value, "counts": dict(value["counts"])}
+        return None
+
+    def run_items(self, items, rule_id):
+        self._progress = {
+            "state": "running",
+            "rule_id": rule_id,
+            "total": len(items),
+            "completed": 0,
+            "current": "",
+            "counts": {},
+            "started_at": time.time(),
+        }
+        self.store.set("progress", self._progress)
+        results = []
+        try:
+            for item in items:
+                self._progress = {**self._progress, "current": item["name"]}
+                result = self.link(item)
+                results.append(result)
+                counts = dict(self._progress["counts"])
+                kind = result.get("method") if result["state"] == "linked" else result["state"]
+                counts[kind] = counts.get(kind, 0) + 1
+                self._progress = {**self._progress, "completed": len(results), "counts": counts}
+            self._progress = {
+                **self._progress,
+                "state": "completed",
+                "current": "",
+                "finished_at": time.time(),
+            }
+            return results
+        except BaseException:
+            self._progress = {**self._progress, "state": "interrupted"}
+            raise
+        finally:
+            self.store.set("progress", self._progress)
 
     def maintenance(self):
         return self.store
@@ -204,9 +248,7 @@ class Engine:
             backup = str(self.store.backup())
             # Large copies must not block AB's HTTP/event loop. Retain the lock
             # until the worker stops even if a client disconnects/cancels.
-            worker = asyncio.create_task(
-                asyncio.to_thread(lambda: [self.link(i) for i in plan["items"]])
-            )
+            worker = asyncio.create_task(asyncio.to_thread(self.run_items, plan["items"], rule_id))
             try:
                 results = await asyncio.shield(worker)
             except asyncio.CancelledError:
