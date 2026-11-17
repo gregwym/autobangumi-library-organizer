@@ -72,9 +72,9 @@ Jellyfin 官方规则：[剧集、字幕和特典](https://jellyfin.org/docs/gen
 
 ### 文件驱动的音乐合集
 
-推荐独立目录结构：`/media/anime cds/albums` 作为 Music 库，`/media/anime cds/collections` 作为独立混合类型（Mixed）库。两个根目录不能互相包含，也不能与视频或下载根目录重叠。插件的 `music_root`、`collections_root` 分别填写这两个路径；插件不创建挂载或媒体服务器库。
+推荐独立目录结构：`/media/anime cds/albums` 作为 Music 库，`/media/anime cds/collections` 作为独立的混合类型（Mixed）辅助索引库。两个根目录不能互相包含，也不能与视频或下载根目录重叠。插件的 `music_root`、`collections_root` 分别填写这两个路径；插件不创建挂载或媒体服务器库。
 
-不要将这个独立入口设为 Boxsets 类型：Jellyfin Web 的合集页会展示全局合集，导致电影合集也出现在音乐入口。Mixed 库保留目录范围，目录中的 `collection.xml` 仍按 BoxSet 识别。
+Jellyfin 的正确浏览入口是 **音乐库 → 合集**，它按成员所属音乐库筛选，只显示包含该音乐库专辑的合集。辅助索引库只负责扫描 `collection.xml`，可在用户首页设置中隐藏。不要把它当作独立音乐合集浏览入口：Boxsets 类型进入全局合集页，混合库的「文件夹」页会隐藏 BoxSet，而其「合集」页按成员范围筛选，专辑在另一音乐库时会显示为空。
 
 每个 TMDB 作品生成一份 `作品名 [ab-tv-ID] [boxset]/collection.xml`，通过专辑目录的绝对路径关联。普通 CD、HiRes、不同发行版分别保留；同套多碟音乐按专辑／艺术家／碟号标签归为一个专辑。新文件成功整理后增量更新合集。文件与清单均有所有权检查，用户手工修改的清单不会被覆盖；其他插件和手工建立的合集不被接管。
 
