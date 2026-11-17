@@ -37,11 +37,11 @@ class LibraryOrganizer(Plugin[Options]):
     async def teardown(self):
         self.bridge.teardown()
 
-    @provider(points.SCHEDULED_TASK, id="organize")
+    @provider(points.SCHEDULED_TASK, id="library-organizer-organize")
     def organize_task(self):
         return ScheduledTask(run=self.engine.tick, interval=60, initial_delay=30)
 
-    @provider(points.SCHEDULED_TASK, id="check-update")
+    @provider(points.SCHEDULED_TASK, id="library-organizer-check-update")
     def update_task(self):
         return ScheduledTask(run=self.updater.check, interval=21600, initial_delay=60)
 

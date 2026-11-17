@@ -91,8 +91,20 @@ async def test_update_real_host_loader_and_rollback(tmp_path, monkeypatch, broke
             entry_point_group="test.no.plugins",
         ),
     )
+    # AB 4.0 scheduler IDs are global: subscription-review already owns this ID.
+    from ab_sdk import points
+    from module.plugin.registry import ProviderEntry
+
+    registry = get_registry()
+    registry.add_provider(
+        points.SCHEDULED_TASK, ProviderEntry("subscription-review", "check-update", lambda: None)
+    )
     await manager.start()
     try:
+        assert (
+            registry.providers(points.SCHEDULED_TASK)["check-update"].plugin_id
+            == "subscription-review"
+        )
         assert manager.statuses()[0].state == "active"
         updater = manager._active[PLUGIN_ID].instance.updater
         new = tmp_path / "newcode"
@@ -137,3 +149,4 @@ async def test_update_real_host_loader_and_rollback(tmp_path, monkeypatch, broke
         context.start_tasks.assert_awaited_once()
     finally:
         await manager.stop()
+        registry.remove_plugin("subscription-review")
