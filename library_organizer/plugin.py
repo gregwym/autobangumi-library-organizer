@@ -49,6 +49,12 @@ class LibraryOrganizer(Plugin[Options]):
     def api(self):
         router = APIRouter()
 
+        async def scan_tasks():
+            try:
+                return await self.bridge.scan()
+            except ValueError as e:
+                raise HTTPException(422, str(e)) from e
+
         @router.get("/status")
         async def status():
             return {
@@ -64,7 +70,7 @@ class LibraryOrganizer(Plugin[Options]):
         @router.post("/scan")
         async def scan():
             async with self.engine.lock:
-                tasks = await self.bridge.scan()
+                tasks = await scan_tasks()
                 return [
                     {
                         "key": t["key"],
@@ -111,7 +117,7 @@ class LibraryOrganizer(Plugin[Options]):
         async def rule_scan(rid: int):
             await require_rule(rid)
             async with self.engine.lock:
-                tasks = await self.bridge.scan()
+                tasks = await scan_tasks()
                 return {
                     "tasks": [task_view(t) for t in tasks if t["rule_id"] == rid],
                     "unassigned": [task_view(t) for t in tasks if t["rule_id"] is None],
@@ -134,9 +140,7 @@ class LibraryOrganizer(Plugin[Options]):
         async def assign_task(rid: int, body: TaskRequest):
             await require_rule(rid)
             async with self.engine.lock:
-                task = next(
-                    (t for t in await self.bridge.scan() if t["key"] == body.task_key), None
-                )
+                task = next((t for t in await scan_tasks() if t["key"] == body.task_key), None)
                 if task is None:
                     raise HTTPException(404, "下载任务不存在")
                 if task["rule_id"] is not None and task["rule_id"] != rid:
@@ -150,7 +154,7 @@ class LibraryOrganizer(Plugin[Options]):
         async def task_binding(rid: int, task_key: str, body: Mapping):
             await require_rule(rid)
             async with self.engine.lock:
-                tasks = await self.bridge.scan()
+                tasks = await scan_tasks()
                 task = next(
                     (t for t in tasks if t["key"] == task_key and t["rule_id"] == rid), None
                 )
@@ -179,11 +183,7 @@ class LibraryOrganizer(Plugin[Options]):
             await require_rule(rid)
             async with self.engine.lock:
                 task = next(
-                    (
-                        t
-                        for t in await self.bridge.scan()
-                        if t["key"] == task_key and t["rule_id"] == rid
-                    ),
+                    (t for t in await scan_tasks() if t["key"] == task_key and t["rule_id"] == rid),
                     None,
                 )
                 if task is None:

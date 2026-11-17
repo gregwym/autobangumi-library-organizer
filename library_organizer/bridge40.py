@@ -92,6 +92,8 @@ class Bridge40:
         )
 
     async def scan(self):
+        if not Path(self.options.source_root).is_dir():
+            raise ValueError("下载根目录不存在或尚未挂载，请先检查插件路径配置")
         from module.database import Database
         from module.downloader import DownloadClient
         from module.downloader.download_client import downloader_ids

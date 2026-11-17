@@ -8,6 +8,21 @@ from library_organizer.models import Options
 from library_organizer.store import Store
 
 
+async def test_missing_download_mount_fails_before_querying_downloader(tmp_path, monkeypatch):
+    from module import downloader
+
+    def unexpected_query(*args):
+        pytest.fail("Missing mount must be detected before contacting the downloader")
+
+    monkeypatch.setattr(downloader, "DownloadClient", unexpected_query)
+    bridge = Bridge40(
+        Options(source_root=str(tmp_path / "unmounted"), library_root=str(tmp_path / "library")),
+        Store(tmp_path / "state.sqlite3"),
+    )
+    with pytest.raises(ValueError, match="尚未挂载"):
+        await bridge.scan()
+
+
 async def test_scan_uses_only_read_apis_and_ignores_tags(tmp_path, monkeypatch):
     from module import downloader
     from module.database import Database

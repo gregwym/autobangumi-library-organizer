@@ -79,7 +79,7 @@ class Detail extends Panel {
       <label>TMDB 条目<select id="matches"><option value="">请搜索或填写 TMDB ID</option></select></label>
       <div class="row"><label>TMDB ID<input id="tmdb" type="number" min="1"></label><label>季<input id="season" type="number" min="0"></label><label>集数偏移<input id="offset" type="number"></label></div>
       <div class="row"><button id="save" class="primary">保存本番设置</button><button id="scan">刷新下载任务</button></div>
-      <p id="task-count" class="muted"></p>
+      <p id="task-count" class="muted">点击“刷新下载任务”查看已有资源；设置可在下载完成前保存。</p>
       <details id="task-panel"><summary>下载任务与逐文件设置</summary><div class="body">
         <label>本番下载任务<select id="task"></select></label><p id="inherit-state" class="muted"></p>
         <div id="override-fields">
@@ -104,7 +104,7 @@ class Detail extends Panel {
     this.$('matches').onchange=()=>{this.$('tmdb').value=this.$('matches').value;this.dirty=true;this.invalidate();};
     this.action('save',async()=>{
       await this.host.api.post(`rules/${this.rid}/binding`,this.mappingForm());
-      this.dirty=false;this.invalidate();await this.loadRule();await this.scan();this.message('本番设置已保存，后续下载将使用此映射。');
+      this.dirty=false;this.invalidate();await this.loadRule();if(this.tasks)await this.scan();this.message('本番设置已保存，后续下载将使用此映射。');
     });
     this.action('scan',()=>this.scan());
     this.$('task').onchange=()=>this.choose();
@@ -145,7 +145,7 @@ class Detail extends Panel {
       const rows=await this.host.api.post(`rules/${this.rid}/jellyfin/verify`,{});
       this.message(rows.length?rows.map(r=>`${r.state} · ${r.path} · ${r.detail}`).join('\n'):'本番暂无已执行的正片映射可核对。');
     });
-    this.run(async()=>{if(!Number.isInteger(this.rid)||this.rid<1)throw new Error('无法确定当前番剧');await this.loadRule();await this.scan();});
+    this.run(async()=>{if(!Number.isInteger(this.rid)||this.rid<1)throw new Error('无法确定当前番剧');await this.loadRule();});
   }
   mappingForm() {return {media_type:this.$('type').value,tmdb_id:Number(this.$('tmdb').value),season:Number(this.$('season').value),episode_offset:Number(this.$('offset').value),episodes:{},main_file:null};}
   invalidate() {this.token=null;if(this.$('apply'))this.$('apply').disabled=true;}
