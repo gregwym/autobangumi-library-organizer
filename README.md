@@ -72,6 +72,8 @@ Jellyfin 官方规则：[剧集、字幕和特典](https://jellyfin.org/docs/gen
 
 ### 文件驱动的音乐合集
 
+完整目录、解析顺序与部署状态对照见 [媒体目录与 Jellyfin 扫描逻辑](docs/LIBRARY_LAYOUT.md)。
+
 输出目录保持同级：`music_root=/media/anime cds/albums`、`collections_root=/media/anime cds/collections`。这两个插件输出根目录不能互相包含，也不能与视频或下载根目录重叠。Jellyfin 的扫描根与插件输出根不是同一个配置：可评估让一个 Music 类型库扫描共同父目录 `/media/anime cds`，同时发现专辑和合集清单。上游 BoxSet 解析器未限制 Music 类型库，但这一合并扫描方案尚未在目标服务器切换验证；当前实机验证的是 Music 库扫描 albums、Mixed 辅助库扫描 collections 的分库配置。插件不创建挂载或媒体服务器库。
 
 Jellyfin 的正确浏览入口是 **音乐库 → 合集**，它按成员所属音乐库筛选，只显示包含该音乐库专辑的合集。若使用分库配置，辅助索引库只负责扫描 `collection.xml`，可在用户首页设置中隐藏。不要把它当作独立音乐合集浏览入口：Boxsets 类型进入全局合集页，混合库的「文件夹」页会隐藏 BoxSet，而其「合集」页按成员范围筛选，专辑在另一音乐库时会显示为空。独立辅助库不是解析器的必需条件。
