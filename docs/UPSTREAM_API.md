@@ -1,149 +1,131 @@
-# AB 4.0 后续统一上游提案：订阅审核 + 媒体库整理
+# AB 插件 API 需求
 
-状态：**设计提案，尚未向 AutoBangumi 提 PR**。先在两个插件中验证行为，再拆分评审友好的 PR。基线为 AB 4.0.0 `bc23984ae4a6d388c0b8381e48f6aa9b60e338ba`。这里的 API 名称是建议，不是 AB 已存在的接口。
+状态：**提案，尚未提交上游 PR**。建议接口名用于说明契约，不代表 AB 已有能力。基线为 [AB 4.0.0 / bc23984](https://github.com/EstrellaXD/Auto_Bangumi/tree/bc23984ae4a6d388c0b8381e48f6aa9b60e338ba)；提交前须按目标分支复核。
 
-相关项目：
-- [订阅审核](https://github.com/gregwym/autobangumi-subscription-review)：版本多选、待确认、历史清理、v2 策略。
-- [媒体库整理](https://github.com/gregwym/autobangumi-library-organizer)：源文件保留、TMDB 映射、媒体库硬链、文件状态清单。
+目标是让[订阅审核](https://github.com/gregwym/autobangumi-subscription-review)和[媒体库整理](https://github.com/gregwym/autobangumi-library-organizer)移除内部接口适配，同时保留原生默认行为。版本策略、音乐分类、合集 XML 和文件执行账本仍由插件维护，不要求并入宿主。
 
-## 1. 共同原则与现状
+## 现有接口的缺口
 
-下载任务、解析候选、番剧身份、下载状态、整理状态需要不同的稳定身份。不能用可修改的 qB tag/category 充当数据库；不能因插件停用就退回绕过审核或修改下载文件的流程。
+| AB 4.0 接口 | 可用能力 | 缺口 |
+| --- | --- | --- |
+| `DOWNLOADER` provider | 实现下载器客户端 | 无供其他插件使用的稳定任务查询、持久关联与提交服务 |
+| `torrent.filter` / `torrent.adding` | 过滤、改写添加请求 | 过滤异常时放行；无法表达持久待审核，也无法阻断全部添加入口 |
+| `METADATA_PROVIDER` | 新规则入库前补全元数据 | 无已有条目的完整季集快照、修订号及按 ID 查询服务 |
+| `RENAME_STRATEGY` / `MEDIA_FILES` | 生成下载文件名、分类 | 不能替换完整整理流程，也不能独占其文件操作范围 |
+| `torrent.organized` | 宿主整理后通知 | 路径属于下载器，不能代表媒体库已发布；无完成任务历史查询 |
+| UI slots / `API_ROUTER` | 全局设置、单番页和鉴权路由 | 缺少带修订号的条目上下文；Shadow DOM 输入有焦点兼容问题 |
+| `kv` / `data_dir` | 插件私有持久化 | 无跨后台任务的维护协调及用户指定本地来源更新服务 |
 
-当前 `rename_strategy.target_name` 只能提供种子内新文件名；`media_files` 只有 media/subtitle/ignore；`torrent.organized` 是宿主整理之后的事件。因此完整媒体库整理不能只靠 rename 插件。
+依据：[SDK context](https://github.com/EstrellaXD/Auto_Bangumi/blob/bc23984ae4a6d388c0b8381e48f6aa9b60e338ba/backend/src/ab_sdk/context.py)、[ingest](https://github.com/EstrellaXD/Auto_Bangumi/blob/bc23984ae4a6d388c0b8381e48f6aa9b60e338ba/backend/src/ab_sdk/ingest.py)、[events](https://github.com/EstrellaXD/Auto_Bangumi/blob/bc23984ae4a6d388c0b8381e48f6aa9b60e338ba/backend/src/ab_sdk/events.py)、[过滤失败策略](https://github.com/EstrellaXD/Auto_Bangumi/blob/bc23984ae4a6d388c0b8381e48f6aa9b60e338ba/backend/src/module/plugin/host.py)。
 
-当前两个插件的所有临时私有依赖都集中在各自 `bridge40.py`。媒体库整理无需修改 AB 源代码/表结构，不在 qB 中存储状态；显式接管时关闭原生整理与硬链，并通过内存守卫拦住手工触发的宿主 rename。卸载不恢复原生整理。AB 仍可能在下载提交时写关联 tag，此兼容版不读取它。彻底移除宿主关联 tag 要在关联 API 就绪后做。
+## P0：下载任务与归属
 
-## 2. 下载任务服务（共同阻塞项）
-
-建议 `ctx.downloads`：
+建议由 `ctx.downloads` 提供以下服务；不向调用插件暴露下载器凭据。
 
 ```python
-async def list_tasks(cursor=None, completed=None) -> TaskPage: ...
-async def files(task_id) -> list[DownloadFile]: ...
-async def submit(request, *, idempotency_key) -> Submission: ...
+async def list_tasks(*, bangumi_id=None, completed=None, cursor=None) -> TaskPage: ...
+async def files(download_id) -> FileSnapshot: ...
+async def submit(request, *, idempotency_key, policy_revision) -> Submission: ...
 async def lookup_submission(idempotency_key) -> Submission | None: ...
 ```
 
-稳定主键：AB download_id；明确 downloader_instance_id、provider_task_id、source torrent identity（v1/v2 hash 或 provider opaque id），禁止把凭据/临时 RSS URL 作为公共身份。
+| 对象 | 必要字段 |
+| --- | --- |
+| `DownloadTask` | 稳定 `download_id`、`downloader_id`、`provider_task_id`、`bangumi_id`、`release_id`、状态及 revision |
+| `DownloadFile` | 稳定 `file_id`、相对路径、下载器路径、AB 本地映射路径、大小、选中状态、完成度及 snapshot revision |
+| `Submission` | 提交键、策略 revision、`pending / accepted / rejected / unknown`、下载关联和可解释原因 |
 
-DownloadFile 至少含稳定 file_id、下载器相对路径、本地路径映射结果、大小、完成度、是否选中。完成事件只是唤醒信号，须可分页查询和重放，覆盖启动前已下载任务、事件丢失、插件首次安装。
+- 关联和提交意图先落库，再请求下载器；网络超时进入 `unknown`，先对账再重试。不能假设下载器原生支持幂等键。
+- 同一远端任务跨重启身份不变；替换 provider 不改变下载器实例 ID。RSS URL 可含令牌，不作为公开主键。
+- 未关联和多重归属显式返回；不能根据标题、媒体库身份或 qB 标签猜所属条目。人工关联也不能覆盖明确的现有归属。
+- 查询支持分页、按条目过滤及启动补查；完成事件只用于唤醒，不能代替查询。任务内文件可分别完成。
+- 将关联从 `ab:<id>`、完成状态从 `ab:renamed` 迁到宿主持久记录。旧标签仅作经核验的迁移提示，用户自有标签保留。
 
-提交关联（download_id → bangumi_id / release_id / submitted policy revision）和提交意图须先落库，再发送网络请求，完成后对账。远端结果不确定不能盲目重发。插件更新不得改变 downloader 实例身份。
+**验收：**两个条目绑定同一作品时，单番查询不读取另一条目的文件；覆盖新任务、文件延迟完成、宿主记录延迟出现、重复事件和提交结果未知后的恢复。
 
-0.5.0 兼容实现已改为 AB Torrent.bangumi_id + downloader_id + qb_hash 确认 entry；历史 qb_hash 为空时只解析标准 magnet BTIH 或 mikanani.me/Download/YYYYMMDD/<hash>.torrent，再与 qB 精确核对。标题正则和下载器标签不参与归属判定。缺失/冲突关联保持待确认，人工关联不能覆盖明确的 AB 所属 entry。单番预览在读取下载文件清单前限制归属，执行时重新核对，旧明细仅更正归属而不搬动媒体文件。此临时 URL 兼容逻辑不能替代正式的持久下载关联 API。
+## P0：统一下载准入与候选
 
-不同 entry 可映射同一 TMDB 作品和季，在目标库保留多个组版本；不可反过来按媒体库身份扩大源文件范围。增量验收覆盖新任务完成、任务内字幕随后完成、AB 记录延迟出现、重复扫描零重复复制，以及修改一个 entry 不触碰另一个 entry 的文件。
+新增强制 `download.preflight`，放在所有下载器添加动作之前，覆盖 RSS、搜索、手动添加、补集和重试。输入包含来源、release、条目快照、集数身份与策略 revision；返回 `allow / hold / reject` 和原因。
 
-未来移除 `ab:<bangumi_id>`、`ab:renamed` 的身份/状态作用；旧 tag 只作一次性迁移提示，需与 DB、任务文件核对，之后不读写。用户自有标签不删除。
+`hold` 是可恢复的待审核，不是已下载或永久排除。启用强制准入的范围须持久记录；所选插件缺失、禁用、异常或熔断时，该范围保持阻断。现有普通过滤钩子的默认失败策略不变，未启用审核的安装不受影响。
 
-## 3. 订阅审核需要的正式接口
+候选接口需满足：
 
-### 所有下载入口统一的准入钩子
+- 整批发布先持久化，再做 v1/v2 决策；版本维度与修订号分别保留。
+- 返回候选匹配、排除阶段和证据；未知字幕组可展示，同分跨季匹配保持歧义。
+- 过滤变化可重评已保存的未下载候选，批准后可通过正式提交服务重投；放宽过滤本身不批准旧资源。
+- 审核确认绑定候选与规则快照，过期拒绝；重投仍经过全部准入及去重，不能凭旧许可直接调用下载器。
 
-RSS、搜索、手动、补集、重试必须经过同一个 `download.preflight`。输入包含 release、bangumi、下载意图、来源、已验证的 episode identity。返回 allow / hold / reject；hold 不等于“已经下载”或“永久已过滤”。禁止钩子缺席时悄悄回退到未审核下载器。
+候选不要求无限保留：宿主声明保留范围／期限；清理不得丢失未决提交和已经承诺保留的审核记录。版本选择 UI、缺集策略及修订优先级仍由插件实现。
 
-### 持久候选与批次处理
+**验收：**关闭或卸载审核插件不能绕过阻断；同批 v2 在 v1 之后到达仍跳过 v1；取消过滤不会自动补下历史；未知提交不会被另一版本抢占。
 
-`releases.discovered(batch)` 在全局/单番过滤的可追溯阶段保存候选；同批 v1/v2 先全部入队再选择。版本维度（组/分辨率/编码/字幕/来源）与修订号分别存储。配置过滤变化后可重评旧的未下载候选，不仅处理 RSS 新 URL；禁止因此自动补下所有旧候选。
+## P0：整理器选择与媒体库事件
 
-`candidates.query/reparse/rebind` 应返回明确匹配证据与歧义，支持未知字幕组；跨季同名不靠“较高季号优先”猜。精确字幕组优先于包含关系；同分多候选保持未匹配。
+增加 `ORGANIZER` provider 和持久选择，由宿主在原生改名之前交出任务。原生整理器仍为默认 provider，未选择插件的用户保持原行为。首个实现只需全局独占；按下载器或条目分范围接管可后续扩展。
 
-### 历史维护与映射修订
+- 一个范围只能有一个整理器。切换前停止旧整理任务、备份配置并确认选择；插件不可用时暂停，不自动退回源文件重命名。
+- 整理器可查询全部已完成任务及后续增量，无需订阅 `torrent.organized` 才开始工作。
+- 默认使用 AB 标题、年份、类型、季和偏移；无需逐番 TMDB 绑定。全局规则与逐番覆盖共用有效配置。
+- 插件提交成功结果后，由宿主发布 `library.files_committed(operation_id, download_id, bangumi_id, files, media_identity, mapping_revision)`。`files` 是实际媒体库路径及类型，不是下载路径。
+- 事件至少一次投递，`operation_id` 稳定；NFO、通知和媒体服务器刷新插件自行去重。失败、待确认及仅写入执行意图的文件不能发布成功事件。
 
-`history.preview_clear(selection)` → revision-bound token；`history.clear(token)` 同一受控操作清除宿主下载历史与插件去重状态，有备份、审计、并发边界，不删除源文件或下载器任务。
+文件执行账本可以继续保存在插件中，但须满足：源／目标身份分开；发布前记录意图；不覆盖非自有文件；硬链、Reflink、复制分别记录；权限、磁盘满和 I/O 错误不能伪装成“不支持”而降级。恢复未完成发布与补回用户主动删除的成功目标须区分。
 
-番剧季集偏移/身份修改发布 `bangumi.mapping_changed(old,new,revision)`，可重算候选与去重键；保留无法安全映射的旧记录，不把去重清空当作修复。
+**验收：**接管后宿主不再改源文件；重复扫描不重复复制；单番整理不触碰其他条目；后续新增单集及字幕可增量发布，原生通知／刷新可订阅新事件。
 
-## 4. 媒体库整理需要的正式接口
+## P1：元数据与变更
 
-### 独立 organizer 扩展点和独占所有权
+建议 `ctx.bangumi.get(id)` 返回完整只读快照：标题、年份、类型、原季、季偏移、集偏移、有效季号、可选 provider IDs 与 revision。发布 `bangumi.mapping_changed(old, new, revision)`；对历史集号保留原始值和映射来源，避免二次偏移。
 
-建议 `ctx.organizers.claim(scope, provider_id)` +可持久接管配置。scope 可为下载器/目录/规则。宿主原生整理和多个插件不能同时持有相同 scope。插件异常/停用时 scope 暂停，不能自动退回原生文件重命名。
+TMDB 查询复用宿主的凭据、代理和缓存，提供 search/get/episodes；保留 tv/movie 类型，查询失败不阻断其他条目。TMDB 是可选纠错源，不是整理准入条件。
 
-当前兼容版只能全局接管；未来上游需支持分范围接管。停用原生 rename 不能妨碍下载、资源候选、状态查询。
+逐任务和逐文件覆盖由插件保存，引用稳定文件 ID 和映射 revision；只对对应文件生效。单番「仅资源」范围必须约束任务覆盖，不能被其重新放大。
 
-### TMDB 与稳定映射服务
+**验收：**修改偏移后候选与去重键可重算，旧批准过期；原始集号不丢失；已改名文件不重复加偏移；新番默认跟随 AB 自动整理。
 
-`metadata.search(type,query)`、`metadata.get(type,id)`、`metadata.episodes(tv_id,season)` 通过宿主凭据/代理/缓存服务调用。必须保留 movie/tv 类型，不以 title 相似度代替媒体身份。搜索歧义由用户确认。
+## P1：维护、历史与旧输出
 
-映射记录：source release / file id → TMDB type/id/season/episode(s)，带映射来源、revision、人工锁定状态。AB 原有季度、季偏移、集数偏移是默认季集来源，插件应实时继承，不另建同级配置。旧文件已应用偏移的情况须有原始发布集号或明确映射证明，不能再加一次。规则级映射与逐文件 override 分开；后者不能意外应用到后续不同文件。
+建议 `ctx.maintenance.run(scope, operation)` 协调停任务、锁、备份、进度、恢复；不持 SQLite 写事务等待网络或大文件核验。操作使用具名契约，不开放任意 SQL 或其他插件的 KV。
 
-### 文件级计划与执行账本
+| 操作 | 契约 |
+| --- | --- |
+| 历史清理 | 预览精确集数与影响规则；一次性 token 绑定 revision；协调宿主历史和插件去重；不删除媒体或下载器任务；未知提交不可清除 |
+| `legacy_outputs(source_identity, work_scope)` | 返回原生输出布局、成功记录及源／目标身份；无记录时可在明确作品范围核验内容，不盲扫整个库 |
+| 开启自动整理 | 完整范围预览后才执行并开启；显示不变、复用、接管、新建、跳过、待确认；执行失败保持关闭 |
+| 媒体库内改名 | 核验已有副本后不覆盖地原子移动；失败保留原文件，不静默降级成额外复制；仅清理旧父目录链的空目录 |
+| 外部移动后更新记录 | 暂停整理，完整内容核验新位置，整批更新路径与目标身份，源身份保留；不移动或复制媒体，提交后可重试更新合集清单 |
 
-建议对象：`OrganizePlan(revision, mapping_revision, source_snapshot, operations)`。
+跨宿主与插件数据库的维护需记录步骤及恢复状态，不假设多个 SQLite 文件天然共享事务。预览过期、配置改变、源或目标被替换均拒绝执行；批次核验失败不提交部分路径更新。
 
-每项包括源文件 fingerprint、file kind、目标、版本标签、原因、previous owned paths。正片/特别篇/附加内容/字幕/资源/未知明确区分，不能用扩展名+目录深度推断正片。
+**验收：**覆盖原生命名策略、同大小但不同内容、多个候选、权限不足、用户替换目标、跨挂载目录迁移及崩溃恢复；不会把不可访问文件当作不存在重新复制。
 
-状态：discovered → needs_mapping / planned → linking → linked；可有 held_conflict / retry_wait / retained_resource。不要求整个合集全部改名成功才处理字幕或宣布正片可用。
+## P1：本地来源更新
 
-执行前验证预览版本，创建目标前记录意图；不覆盖非自有文件；按实际策略验证源与目标身份后写结果；结果必须区分 hardlink / reflink / copy。当前插件采用硬链 → Linux FICLONE → 普通复制，明确告知复制占用额外空间；不能将三种方式一律标为“硬链成功”。分别持久化源与目标 fingerprint，避免副本重复处理或映射变更时误清理。磁盘满、权限和 I/O 错误不得按“不支持”降级。新链接验证后才允许删除经 fingerprint 确认仍为自有的旧链接。崩溃恢复必须依赖意图和文件事实，不依赖标签或日志。
+建议宿主统一提供 `plugins.updates.check/install`。用户显式选择未签名本地来源后，自动检查、单击安装；官方市场继续使用原签名策略。
 
-计划目标碰撞在执行前解决。字幕绑定具体视频版本；电影多正片、多个集数区间、季 0 特典不能一律套简单偏移。
+契约包括固定来源及插件身份、版本／SDK 兼容性、校验和、ZIP 路径校验、更新锁、后台任务协调、代码备份和重载失败回滚。数据迁移须声明备份和恢复办法；不能以代码回滚暗示数据已回滚，也不全局绕过验签。
 
-0.6.0 的附带资源策略：视频特典归所属季；单个文件可明确覆盖为 Season 00 特别篇，不改变同任务正片季度。音乐使用可选独立输出根目录，未配置则归档；配置后可重新评估既有归档，甚至在下载任务移除后使用已验证的插件自有副本。重放仍须核对当前 AB entry 归属、绑定、源身份和副本 fingerprint，不因媒体库身份相同跨 entry。目标类型应扩展为 video / music / archive，归档可成为后续受控迁移的数据源，不能只依赖下载器当前文件列表。部分资源重放不能抹去同任务的正片整理历史。字幕/音轨对视频的依赖也应包含在计划中，视频目标冲突时阻止发布孤立的 sidecar。
+**验收：**错误 ID、越界路径、校验失败和不兼容版本不安装；同时点击只执行一次；新代码加载失败恢复旧代码；断电后有可恢复的旧代码和数据备份。
 
-### 新事件与媒体服务器职责边界
+## 可独立提交的修复
 
-`library.files_committed` 应包含实际媒体库路径及媒体身份，供媒体服务器刷新、NFO、通知使用。不要把下载目录路径复用为媒体库路径。事件至少一次投递，带稳定 operation_id，订阅者幂等。
+- `SCHEDULED_TASK` 的 provider ID 按插件隔离，调度标识使用 `<plugin_id>/<provider_id>`。验收两个插件使用同名任务，以及单独重载／卸载互不影响。
+- 弹窗焦点边界正确处理 Shadow DOM 的 `composedPath()`，同时保留 Tab 围栏和弹窗外焦点约束；覆盖键盘与嵌套组件输入。无需全局禁用焦点陷阱。
 
-扫描请求成功 ≠ 识别成功。由独立媒体服务器插件提供可选 `library.verify` 按媒体库路径、作品 provider id、季集号对账，包含 Jellyfin MediaSources 多版本路径；不自动覆盖用户元数据。附加资源保存率和可播放媒体识别率分别报告。
+## PR 拆分与迁移
 
-## 5. 共享维护和更新 API
+| 顺序 | 范围 | 依赖 |
+| --- | --- | --- |
+| 1 | 定时任务作用域、Shadow DOM 焦点修复，各自独立 PR | 无 |
+| 2 | 稳定下载关联、只读任务／文件服务 | 无；原生流程保持默认 |
+| 3 | 幂等提交、统一准入、候选与重投 | 任务关联 |
+| 4 | 整理器选择、条目快照、媒体库提交事件 | 任务查询；元数据字段可分 PR |
+| 5 | 维护协调、历史清理、原生输出迁移 | 关联及 revision 契约 |
+| 6 | 本地来源更新服务 | 维护与插件生命周期 |
 
-建议 `ctx.maintenance.transaction(scope)` 暂停相关后台任务、获取有序锁、备份 SQLite/配置、执行/恢复；禁止持 DB 写事务等待下载器/TMDB 网络。SQLite BUSY 重试只针对幂等、短事务，不掩盖死锁。
+每个 PR 包含 SDK 类型、宿主实现、契约测试、兼容说明及最小示例，不合入这两个插件的完整 UI。文件移动和音乐规则等可先留在插件，只在存在通用需求时上移。
 
-建议宿主提供 `plugins.updates.check/install`，固定来源、清单身份、版本、checksum、兼容性校验、安装锁、代码回滚和可声明的数据迁移备份。用户选择自动检查 + 单击升级。官方市场签名策略与用户明确安装的本地未签名来源分开；不全局绕过签名。
+接口可用后，订阅审核逐项移除 `review_gate/bridge40.py` 中的下载门面、RSS 过滤和匹配包装；整理器移除 `library_organizer/bridge40.py` 中的改名守卫、配置接管、私有下载查询、TMDB 和原生 KV 读取。两个插件再将维护与更新交给宿主。
 
-目前两个插件各自实现固定仓库 Release 更新器，每 6 小时检查；成功/失败重载测试使用真正的 AB PluginManager。备份数据但失败只自动回滚代码，停电恢复边界需公开记录。
-
-## 6. 建议上游提交顺序
-
-1. 固化失败案例测试：季号误当集数、特典冲突刷屏、跨季匹配、未知字幕组、过滤变化候选重评。
-2. 统一任务服务/准入和持久关联，消除 tag 依赖，提供预览/维护语义。
-3. organizer 所有权、TMDB 映射服务、媒体库提交事件，保留原生实现为默认 provider。
-4. 文件级状态及迁移、统一更新服务。两个插件逐项删除私有适配器。
-
-验收必须涵盖断电/进程退出、版本升级回滚、同一任务重复事件、路径变化、目标被用户替换、并发规则修改、未下载文件、已有做种及媒体库不受影响。提交 PR 时每项说明已实现/仅提案，不一次性塞入整套 UI 与私有兼容层。
-
-## Provider ID 作用域
-
-AB 4.0 的 `scheduled_task` ID 是全局唯一，两个插件都使用 `check-update` 会导致后加载插件整体失败。当前整理插件使用 `library-organizer-` 前缀规避；建议宿主让 scheduled_task 与 API_ROUTER 一样按插件隔离，在调度器使用 `<plugin_id>/<provider_id>` 作为稳定标识，并覆盖插件共存与热更新测试。
-
-## Jellyfin 刷新认证兼容性
-
-AB 内置 media-server-refresh 使用旧 `X-Emby-Token`。Jellyfin 12 默认禁用旧认证，现有有效 API Key 也会返回 401；0.6.0 整理插件曾使用 `Authorization: MediaBrowser Token="..."`；0.7.0 已移除整个媒体服务器 API 集成，改为文件驱动。后续上游 PR 应同步修正内置刷新插件并增加拒绝旧认证头的回归测试，不要求用户重新生成密钥或开启旧认证。参考 [Jellyfin 12 发布说明](https://jellyfin.org/posts/jellyfin-release-12.0/)。
-
-## 文件驱动音乐关联（0.7.0）
-
-整理器输出媒体文件和自有 `collection.xml` 清单，不依赖 Jellyfin URL、API Key 或 item ID。通用 `collection_path_map(local, remote)` 仅翻译 XML 的文件系统引用，容器路径相同时不配置；媒体服务器的库创建、扫描、验证由管理员或独立集成处理。上游文件提交事件可通知已有刷新插件，刷新插件持有权限，不应倒置到整理器。Music、video 与 collections 输出根目录独立；增量合集只纳入已成功发布且所有权验证通过的 Series、Movie 和 MusicAlbum 目录，跨 entry 可聚合到同一作品，但每次文件整理仍保持 entry 隔离。作品身份继承 AB 或已有 TMDB 覆盖，不以种子／组定义合集；不引入外部资源搜索或系列关系推断。历史成功记录可单独重建清单，不重新计划媒体操作；中断时的所有权意图不能冒充已发布成果。
-
-目标 Jellyfin 12.4 的实机约束：`LockData=true` 会阻止后续本地元数据导入，所以生成清单使用 false。独立的生成合集库须将 `MetadataSavers=[]`，避免服务器回写清单。当前 BoxSet 元数据合并对外部清单成员取并集；清单新增成员可导入，但仅从 XML 删除成员不保证从 Jellyfin 数据库移除。插件不为绕过此限制请求媒体服务器 API；如用户要清空或重建合集，交由 Jellyfin 管理。
-
-Jellyfin 12.4 实机确认：生成清单用独立 Mixed 辅助索引库扫描，并从用户首页隐藏该辅助入口；用户从 Music 库自身的「合集」页浏览。Boxsets 页面展示全局合集；Mixed 文件夹页筛掉 BoxSet，Mixed 合集页又按成员所属库筛选（并非按清单文件路径），因此无法作为单独音乐合集入口。Music 库的合集查询能返回其专辑所属的外部清单集合。此设置属于媒体服务器部署说明，不引入插件的媒体服务器 API 权限。
-
-0.7.1 新增 entry 级 `scope=all|resources`，资源范围限制优先于任务覆盖，保存于插件独立绑定中，不修改 AB 原生季度或下载路径。上游详情扩展 API 应允许这一类插件特定的逐番策略，并在自动扫描时读取同一有效配置。
-
-### Shadow DOM 与弹窗焦点（0.7.2 兼容层）
-
-AB 4.0 的 Naive UI / Vueuc 焦点陷阱以 `mainEl.contains(getPreciseEventTarget(event))` 判断边界；插件双层 Shadow DOM 中的输入不满足 Node.contains，导致焦点立即跳回弹窗标签。上游应按 `event.composedPath().includes(mainEl)`（并正确处理 Tab 边界）判断，不应全局关闭焦点陷阱。插件临时仅对自身详情面板的 focus 事件，把 composedPath 的起点重定位到 AB 的 light-DOM slot；外部焦点事件不变，卸载时移除监听。参考 [Vueuc FocusTrap](https://github.com/07akioni/vueuc/blob/main/src/focus-trap/src/index.ts)。
-
-## 原生默认行为与可选纠错（0.8.0）
-
-完成任务只要有明确、未删除的 AB 归属，默认使用其 official_title、year、episode_type、season、season_offset 和 episode_offset；不再以 TMDB 绑定作为准入条件。AB 4.0 Bangumi 没有持久 TMDB ID，不能要求插件为了接替原生功能再让用户逐番搜索。显式 TMDB 覆盖仍有最高优先级，原有输出布局保持；切回 AB 模式只需保存空 ID，无需清理历史数据库或修改下载器。电影默认选体积最大的唯一正片候选；大小相同保持待确认。无法解析的多集单文件、小数集号和冲突仍待人工确认。
-
-正式 metadata API 应提供上述 AB 字段与 revision、有效季号计算、已确认的可选 provider IDs、文件解析结果。TMDB enrichment 是可选 provider，网络失败不能阻断其他 AB entry。原生重命名/硬链是自动完成默认；替换 organizer 同样必须默认处理未来新番，人工映射只作覆盖。有效设置优先级为任务覆盖 > 单番覆盖 > AB 元数据；单番 resources 范围始终约束任务覆盖。
-
-自动整理与手动补链须区分：已提交成功后用户删除的目标不自动重建；只写了发布意图而尚未成功的文件仍需恢复。当前插件以独立 SQLite 成功记录判断，不依赖 qB 标签。未来事件应有 restore_missing 语义，回放完成事件保持原生的不重建行为。自动开关升级后保持原值，开启时历史未绑定任务也会进入整理范围；维护页须明确提示这一点。
-
-## 原生文件迁移与启用审阅（0.10.0）
-
-建议正式 `ctx.library.legacy_outputs(source_identity)` 返回原生布局规则、源／目标 fingerprint 与成功记录，读操作不得泄露其他插件任意 KV。当前兼容层只读取 hardlink 插件 `link:` 记录及其 source_root/library_root；不写原生 KV。插件按明确路径规则和源身份确认候选，原生记录缺失时才做完整内容核验，多个候选留待确认，不以文件名／集号证明版本一致。接管在用户确认的单次计划中执行，先记迁移所有权意图，再在同一媒体库文件系统中发布名称、校验和清理旧路径；禁止“复用”失败后悄悄复制。
-
-自动开启 API 需要完整自动范围预览 token；关闭无需 token。全量表格包含不变、复用、接管改名、新建、跳过、待确认。token 校验任务、设置和绑定快照并单次消费，开启前执行确认计划；失败保持关闭。后续新下载自动增量，不能把首次历史接管隐藏在开关副作用里。
-
-0.10.2 的迁移计划增加明确的 work_root 范围；原生精确路径／记录未命中时，只在当前作品目录内查找视频和已绑定 sidecar 的同扩展名、同大小候选，最终以源身份或完整 SHA-256 证明内容。手工季号修正不会因文件名变化变成重复复制。大小／mtime／季集相同不足以接管；多个有效候选留待确认，其他文件键的已拥有目标排除，符号链接目录不遍历，核验 I/O 失败保持待确认。未来正式 legacy_outputs 应允许按作品范围和文件身份发现已改名副本，避免插件读取整个库或猜测文件名。
-
-0.10.3 将媒体库内迁移改为原子、不覆盖目标的移动；迁移意图仍须先持久提交，重启后按文件身份恢复，不依赖旧路径仍存在。应提供 `move_no_replace` 和受控的空目录清理接口，后者只接受已迁移旧文件的父目录链，止于输出根目录，并保护下载根目录及其他配置根目录；不得用递归删除实现。文件已成功迁出、空目录因权限不能移除时，不将媒体文件整理标记为失败。
-
-0.10.4 增加外部移动后的音乐根目录记录更新：配置新根目录、暂停整理后，以成功历史中的源身份和完整 SHA-256 核验每个新文件；全批通过后备份并原子更新插件归属、目标 fingerprint、历史和合集引用，源下载 fingerprint 不变，媒体文件零写入。未来原生维护 API 应把这种“文件已由管理员移动，仅更新记录”的操作与移动文件的整理计划分开，提供完整预览、单次 token、配置与记录快照核验，以及提交后的清单更新重试；不能只改路径配置后把已有音乐当成新文件复制。
+现有审批、候选、归属、文件所有权及未决投递必须迁移保留。通过断言插件不再导入 `module.*`、无运行时包装，并同时运行原生及两插件集成测试，作为移除兼容层的完成条件。

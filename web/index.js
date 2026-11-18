@@ -121,7 +121,7 @@ class Settings extends Panel {
       <div class="row"><span id="automatic-state" class="badge" role="status"></span><button id="automatic-action">预览并开启自动整理</button>${info('automatic','默认跟随 AB 标题、年份与季集偏移，无需逐番绑定。开启前先预览并确认全部计划；之后每分钟检查新下载和历史资源。手动删除的已整理文件不自动重建，可在单番详情手动补链。')}</div>
       <div class="row"><button id="status">刷新状态</button><button id="collections">更新作品合集</button>${info('collections','校验已成功整理的记录并更新动画、电影和专辑的关联清单，不移动或复制媒体文件。新下载整理成功后自动更新。清单目录单独扫描，容器路径不同时配置合集引用路径映射。无需媒体服务器 API 凭据。')}</div>
       <details><summary>音乐目录已在外部移动 ${info('moved','先关闭自动整理，用 DSM 等工具移动目录并调整容器挂载，在插件选项保存新音乐库路径。此处将新位置与原下载逐文件核验 SHA-256，再更新历史、归属和合集引用；不移动、重命名或复制媒体。原下载须仍可读取。任一文件校验失败则整批不更新，执行前自动备份。')}</summary><div class="body">
-        <label>原音乐库路径（AB 内路径）<input id="moved-old" placeholder="/media/anime cds/albums"></label>
+        <label>原音乐库路径（AB 内路径）<input id="moved-old" placeholder="/old-music"></label>
         <p>当前音乐库：<span id="moved-new"></span></p>
         <div class="row"><button id="preview-moved">预览路径记录更新</button><button id="confirm-moved" class="primary" hidden>仅更新路径记录</button><span id="moved-state" class="badge" role="status"></span></div>
         <div id="moved-plan" class="table-scroll" hidden></div>
