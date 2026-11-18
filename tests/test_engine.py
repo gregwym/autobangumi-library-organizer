@@ -433,3 +433,154 @@ async def test_relocated_copy_recovers_after_final_bookkeeping_crash(env, monkey
     await e.apply(plan["token"])
     assert len(e.store.owned()) == 1
     assert fingerprint(Path(plan["items"][0]["target"])) == original_fp
+
+
+@pytest.mark.parametrize("native_record", [False, True])
+async def test_native_replica_is_previewed_then_renamed_without_copy(
+    env, monkeypatch, native_record
+):
+    from library_organizer import legacy
+
+    e, task, src = env
+    old = Path(e.options.library_root) / src.name
+    old.parent.mkdir()
+    old.write_bytes(src.read_bytes())
+    original = fingerprint(old)
+    layout = {"records": {str(old): [fingerprint(src), original]}} if native_record else {}
+    e.bridge.legacy_layout = AsyncMock(return_value=layout)
+    if native_record:
+        monkeypatch.setattr(
+            legacy, "content_hash", lambda *a: pytest.fail("Recorded identity needs no rehash")
+        )
+    p = await e.preview(automatic=True)
+    item = p["items"][0]
+    assert item["operation"] == "adopt" and item["existing_paths"] == [str(old)]
+    assert old.exists() and not Path(item["target"]).exists() and not e.store.owned()
+    monkeypatch.setattr(
+        "library_organizer.engine.publish",
+        lambda *a: pytest.fail("Must reuse the existing replica"),
+    )
+    result = await e.apply(p["token"], enable_automatic=True)
+    assert result["automatic"] is True
+    assert result["results"][0]["action"] == "relocated"
+    assert not old.exists() and fingerprint(Path(item["target"])) == original
+    assert src.exists()
+    p = await e.preview(automatic=True)
+    assert p["items"][0]["operation"] == "unchanged"
+    assert p["counts"] == {"unchanged": 1}
+
+
+async def test_native_output_at_final_target_is_adopted_without_copy(env):
+    e, task, src = env
+    p = await e.preview()
+    dst = Path(p["items"][0]["target"])
+    dst.parent.mkdir(parents=True)
+    dst.write_bytes(src.read_bytes())
+    fp = fingerprint(dst)
+    p = await e.preview()
+    assert p["items"][0]["operation"] == "adopt_existing"
+    await e.apply(p["token"])
+    assert fingerprint(dst) == fp and e.store.completed(p["items"][0])
+
+
+async def test_different_native_version_is_not_reused(env):
+    e, task, src = env
+    old = Path(e.options.library_root) / src.name
+    old.parent.mkdir()
+    old.write_bytes(b"xyz")  # Same size, different content.
+    p = await e.preview()
+    assert p["items"][0]["operation"] == "create"
+    await e.apply(p["token"])
+    assert old.read_bytes() == b"xyz"
+
+
+async def test_multiple_native_paths_are_held_without_adoption(env):
+    e, task, src = env
+    root = Path(e.options.library_root)
+    root.mkdir()
+    paths = [root / src.name, root / "old-name.mkv"]
+    for path in paths:
+        path.write_bytes(src.read_bytes())
+    e.bridge.legacy_layout = AsyncMock(
+        return_value={
+            "records": {str(path): [fingerprint(src), fingerprint(path)] for path in paths}
+        }
+    )
+    p = await e.preview()
+    assert p["held"] == 1 and p["counts"] == {"held": 1}
+    assert set(p["items"][0]["existing_paths"]) == {str(p) for p in paths}
+    await e.apply(p["token"])
+    assert all(p.exists() for p in paths) and not e.store.owned()
+
+
+async def test_existing_replica_changed_after_preview_never_triggers_new_copy(env):
+    e, task, src = env
+    old = Path(e.options.library_root) / src.name
+    old.parent.mkdir()
+    old.write_bytes(src.read_bytes())
+    p = await e.preview()
+    old.write_bytes(b"user changed this file")
+    result = await e.apply(p["token"])
+    assert result["results"][0]["state"] == "failed"
+    assert old.exists() and not Path(p["items"][0]["target"]).exists()
+
+
+async def test_automatic_enable_requires_complete_valid_preview(env):
+    e, task, src = env
+    p = await e.preview(rule_id=1)
+    with pytest.raises(ValueError):
+        await e.apply(p["token"], rule_id=1, enable_automatic=True)
+    assert not e.store.get("automatic", False)
+    p = await e.preview(automatic=True)
+    e.options.version_suffix = False
+    with pytest.raises(ValueError, match="配置已变化"):
+        await e.apply(p["token"], enable_automatic=True)
+    assert not e.store.get("automatic", False)
+    p = await e.preview(automatic=True)
+    assert p["counts"] == {"create": 1}
+    assert not e.store.get("automatic", False)
+    await e.apply(p["token"], enable_automatic=True)
+    assert e.store.get("automatic")
+
+
+async def test_removed_owned_replica_is_skipped_in_automatic_preview(env):
+    e, task, src = env
+    p = await e.preview()
+    await e.apply(p["token"])
+    Path(p["items"][0]["target"]).unlink()
+    p = await e.preview(automatic=True)
+    assert p["items"][0]["operation"] == "skipped"
+
+
+async def test_native_deleted_replica_is_not_resurrected_automatically(env):
+    e, task, src = env
+    old = Path(e.options.library_root) / src.name
+    e.bridge.legacy_layout = AsyncMock(
+        return_value={"records": {str(old): [fingerprint(src), [1, 2, 3, 4]]}}
+    )
+    p = await e.preview(automatic=True)
+    assert p["items"][0]["operation"] == "skipped"
+    r = await e.apply(p["token"])
+    assert r["results"][0]["state"] == "skipped"
+    assert not Path(p["items"][0]["target"]).exists()
+    p = await e.preview()
+    assert p["items"][0]["operation"] == "create"
+
+
+async def test_preview_never_adopts_file_owned_by_another_entry(env):
+    e, task, src = env
+    old = Path(e.options.library_root) / src.name
+    old.parent.mkdir()
+    old.write_bytes(src.read_bytes())
+    e.store.claim(
+        {"key": "other-entry-file", "target": str(old), "fingerprint": fingerprint(src)},
+        fingerprint(old),
+        "existing",
+    )
+    p = await e.preview(rule_id=1)
+    assert p["items"][0]["operation"] == "create"
+    await e.apply(p["token"], rule_id=1)
+    assert (
+        old.exists()
+        and next(r for r in e.store.owned() if r["target"] == str(old))["key"] == "other-entry-file"
+    )

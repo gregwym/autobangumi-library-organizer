@@ -14,6 +14,7 @@ from .updater import Updater
 
 class Toggle(BaseModel):
     enabled: bool
+    token: str | None = Field(default=None, min_length=20, max_length=100)
 
 
 class TaskRequest(BaseModel):
@@ -320,11 +321,23 @@ class LibraryOrganizer(Plugin[Options]):
 
         @router.post("/automatic")
         async def automatic(body: Toggle):
-            self.store.set("automatic", body.enabled)
             if body.enabled:
-                self.store.set("retry_at", 0)
-                self.store.set("automatic_signature", None)
-            return {"automatic": body.enabled}
+                if not body.token:
+                    raise HTTPException(409, "请先预览完整计划，确认后开启自动整理")
+                try:
+                    return await self.engine.apply(body.token, enable_automatic=True)
+                except ValueError as e:
+                    raise HTTPException(409, str(e)) from e
+            async with self.engine.replay_lock, self.engine.lock:
+                self.store.set("automatic", False)
+            return {"automatic": False}
+
+        @router.post("/automatic/preview")
+        async def automatic_preview():
+            try:
+                return await self.engine.preview(automatic=True)
+            except (OSError, ValueError) as e:
+                raise HTTPException(409, str(e)) from e
 
         @router.post("/collections/refresh")
         async def refresh_collections():

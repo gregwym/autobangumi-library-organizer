@@ -1,5 +1,7 @@
 const css=`:host{display:block;font:14px/1.5 var(--ab-font-family,system-ui);color:var(--ab-color-text,#222)}*{box-sizing:border-box}details{border:1px solid var(--ab-color-border,#ddd);border-radius:var(--ab-radius-md,8px);overflow:hidden}summary{padding:7px 14px;font-weight:600;cursor:pointer;color:var(--ab-color-text-secondary,#666)}.body{padding:14px;background:var(--ab-color-surface,#fff);border-top:1px solid var(--ab-color-border,#ddd)}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}input,select,button,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--ab-color-border,#aaa);border-radius:6px;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.primary{background:var(--ab-color-primary,#5274d9);color:white}label{display:grid;gap:5px;margin:8px 0}label:has(input[type=checkbox]){display:flex;align-items:center;gap:8px}input[type=checkbox]{width:auto;margin:0;accent-color:var(--ab-color-primary,#526fe4)}select,textarea{max-width:100%;width:100%}textarea{min-height:70px}small,.muted{color:var(--ab-color-text-secondary,#777)}.plan{max-height:400px;overflow:auto}.item{border-bottom:1px solid var(--ab-color-border,#ddd);padding:9px 0;overflow-wrap:anywhere}#message{white-space:pre-wrap;margin-top:10px}.badge{border-radius:999px;padding:2px 9px;background:#8882}.error{color:#c65540}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;vertical-align:top;padding:9px 10px;border-bottom:1px solid var(--ab-color-border,#ddd)}th{position:sticky;top:0;background:var(--ab-color-surface,#fff)}td.path{min-width:230px;max-width:340px;overflow-wrap:anywhere;white-space:pre-wrap}td{min-width:90px}.table-scroll{overflow:auto;max-height:400px}[hidden]{display:none!important}`;
 const progressMarkup = `<section id="progress-panel" hidden aria-live="polite"><p id="progress-label"></p><progress aria-label="文件整理进度" id="progress-bar" max="1" value="0" style="width:100%;accent-color:var(--ab-color-primary,#5274d9)"></progress><p id="progress-current" class="muted" style="overflow-wrap:anywhere"></p><small id="progress-counts"></small></section>`;
+const operationNames={unchanged:'已有目标 · 不变',reuse:'复用已有副本',adopt:'接管旧文件 · 改名',adopt_existing:'接管已有目标',create:'新建目标',held:'待确认',skipped:'已跳过'};
+const planMarkup=`<section id="review" hidden><p id="plan-summary"></p><label>筛选预览<input id="plan-filter" type="search" placeholder="番名、路径或操作"></label><div id="plan" class="table-scroll"></div><div class="row"><button id="plan-prev">上一页</button><span id="plan-page"></span><button id="plan-next">下一页</button></div></section>`;
 const stateNames = {linked:'已整理',exists:'已有链接',held:'待确认',failed:'失败',skipped:'已跳过'};
 function summary(rows) {
   const counts={}; for(const r of rows){const key=r.action==='relocated'?'复用副本':r.state==='linked'&&r.method?({hardlink:'硬链',reflink:'Reflink',copy:'普通复制'}[r.method]||r.state):r.state;counts[key]=(counts[key]||0)+1;}
@@ -10,6 +12,40 @@ class Panel extends HTMLElement {
     if(!this.shadowRoot)this.attachShadow({mode:'open'});
     this.shadowRoot.innerHTML=`<style>${css}</style>${body}`;
     this.$=id=>this.shadowRoot.getElementById(id);
+  }
+  initPlan() {
+    this.$('plan-filter').oninput=()=>{this.planPage=0;this.renderPlanPage();};
+    this.action('plan-prev',()=>{this.planPage--;this.renderPlanPage();});
+    this.action('plan-next',()=>{this.planPage++;this.renderPlanPage();});
+  }
+  renderPlan(plan) {
+    this.planRows=plan.items;this.planPage=0;this.$('plan-filter').value='';
+    this.$('review').hidden=false;
+    this.$('plan-summary').textContent=`完整预览：${plan.items.length} 个文件 · `+Object.entries(plan.counts||{}).map(([k,n])=>`${operationNames[k]||k} ${n}`).join(' · ');
+    this.renderPlanPage();
+  }
+  filteredPlan() {
+    const q=this.$('plan-filter').value.trim().toLowerCase();
+    return (this.planRows||[]).filter(i=>!q||JSON.stringify(i).toLowerCase().includes(q)||(operationNames[i.operation]||'').includes(q));
+  }
+  syncPlanPagination() {
+    this.$('plan-prev').disabled=!this.planPage;
+    this.$('plan-next').disabled=(this.planPage+1)*25>=this.filteredPlan().length;
+  }
+  renderPlanPage() {
+    const rows=this.filteredPlan(),total=rows.length;
+    this.planPage=Math.max(0,Math.min(this.planPage||0,Math.ceil(total/25)-1));
+    const start=this.planPage*25,table=document.createElement('table'),head=table.createTHead().insertRow();
+    for(const title of ['源文件','已有文件','媒体库目标','预期操作','说明']){const th=document.createElement('th');th.scope='col';th.textContent=title;head.append(th);}
+    const body=table.createTBody();
+    for(const i of rows.slice(start,start+25)) {
+      const tr=body.insertRow();
+      const values=[i.source||i.name,(i.existing_paths||[]).join('\n')||'—',i.target||i.planned_target||'—',operationNames[i.operation]||i.operation,i.explanation||i.reason||i.notice||'—'];
+      values.forEach((v,n)=>{const td=tr.insertCell();td.textContent=v;if(n<3)td.className='path';});
+    }
+    this.$('plan').replaceChildren(table);
+    this.$('plan-page').textContent=total?`${start+1}–${Math.min(start+25,total)} / ${total} 条（共 ${this.planRows.length} 条）`:'无匹配记录';
+    this.syncPlanPagination();
   }
   watchProgress(ruleId) {
     clearTimeout(this.progressTimer);
@@ -28,11 +64,11 @@ class Panel extends HTMLElement {
     this.$('progress-panel').hidden=!p;if(!p)return;
     const labels={running:'正在整理',completed:'文件处理完成',interrupted:'整理已中断，请重新预览后继续'};
     const prefix=this.rid&&p.rule_id===null?'全局任务 · ':'';
-    this.$('progress-label').textContent=prefix+labels[p.state]+(p.state==='interrupted'?'':` · ${p.completed} / ${p.total} 个文件`);
+    this.$('progress-label').textContent=prefix+(p.phase==='preview'?(p.state==='running'?'正在核验预览（只读）':'预览核验完成'):labels[p.state])+(p.state==='interrupted'?'':` · ${p.completed} / ${p.total} 个文件`);
     this.$('progress-bar').max=p.total||1;this.$('progress-bar').value=p.completed;
     this.$('progress-bar').hidden=p.state==='interrupted';
     this.$('progress-current').textContent=p.current?'当前：'+p.current:'';
-    const names={reused:'复用副本',hardlink:'硬链',reflink:'Reflink',copy:'普通复制',exists:'已存在',held:'待确认',failed:'失败',skipped:'已跳过'};
+    const names={reused:'复用副本',hardlink:'硬链',reflink:'Reflink',copy:'普通复制',existing:'已有文件',exists:'已存在',held:'待确认',failed:'失败',skipped:'已跳过'};
     this.$('progress-counts').textContent=Object.entries(p.counts).map(([k,n])=>`${names[k]||k} ${n}`).join(' · ');
   }
   message(text,error=false) {this.$('message').textContent=text;this.$('message').className=error?'error':'';}
@@ -62,6 +98,7 @@ class Settings extends Panel {
       <p class="muted">接管会备份配置并关闭原生整理与硬链。下载文件保留原名，停用自动整理不会删除已建链接。</p>
       <div class="row"><button id="status">刷新状态</button><button id="collections">更新作品合集</button></div>
       <small>更新合集只校验已有整理记录并重建清单，不移动或重新复制媒体文件。新下载整理成功后自动更新。</small>
+      ${planMarkup}<div class="row"><button id="confirm-auto" class="primary" hidden>执行以上计划并开启自动整理</button><button id="cancel-auto" hidden>取消</button></div>
       ${progressMarkup}<div id="message" role="status"></div>
       <div class="row"><span id="version"></span><button id="check">检查更新</button><button id="update" hidden></button></div>
       <small>每 6 小时检查新版，点击一次更新；更新前备份，启动失败恢复旧代码。</small>
@@ -71,8 +108,32 @@ class Settings extends Panel {
       await this.host.api.post('activate',{});await this.status();
     });
     this.$('automatic').onchange=()=>this.run(async()=>{
-      try {await this.host.api.post('automatic',{enabled:this.$('automatic').checked});}
-      finally {await this.status();}
+      const enable=this.$('automatic').checked;
+      this.$('automatic').checked=Boolean(this.automatic);
+      this.autoToken=null;
+      if(enable) {
+        if(!this.active)throw new Error('请先接管整理，再开启自动整理。');
+        this.message('正在读取全部完成下载并核验已有文件，尚未开始整理…');
+        const p=await this.host.api.post('automatic/preview',{});
+        this.renderPlan(p);this.autoToken=p.token;
+        this.$('confirm-auto').hidden=false;this.$('cancel-auto').hidden=false;
+        this.message('尚未开启。请检查完整计划，确认后才会执行；待确认项目保持原位。预览有效期 15 分钟，配置或下载变化后须重新预览。');
+      } else {await this.host.api.post('automatic',{enabled:false});await this.status();}
+    });
+    this.initPlan();
+    this.action('cancel-auto',async()=>{
+      this.autoToken=null;this.$('review').hidden=true;this.$('confirm-auto').hidden=true;this.$('cancel-auto').hidden=true;
+      this.message('已取消，自动整理保持关闭。');
+    });
+    this.action('confirm-auto',async()=>{
+      const token=this.autoToken;if(!token)return;this.autoToken=null;
+      this.message('正在核对预览并执行；文件处理完成后开启自动整理…');
+      try {
+        const r=await this.host.api.post('automatic',{enabled:true,token});
+        await this.status();
+        this.message(summary(r.results)+(r.automatic?'\n自动整理已开启，新下载会继续按相同规则整理。':'\n存在执行失败，自动整理保持关闭；请重新预览。'));
+      } finally {this.$('confirm-auto').hidden=true;this.$('cancel-auto').hidden=true;}
+
     });
     this.action('status',()=>this.status());
     this.action('collections',async()=>{
@@ -88,6 +149,7 @@ class Settings extends Panel {
   }
   async status() {
     const s=await this.host.api.get('status');
+    this.active=s.active;this.automatic=s.automatic;
     this.$('state').textContent=s.active?'已接管':'预览模式';this.$('automatic').checked=s.automatic;
     const reports=(s.collections||[]).map(x=>x.detail).join('\n');
     this.message(s.error||[(s.results?.length?'上次整理：'+summary(s.results):'尚未执行整理。'),reports].filter(Boolean).join('\n'),Boolean(s.error));
@@ -98,7 +160,7 @@ class Settings extends Panel {
     this.latest=u.available?u.version:null;
     this.$('update').hidden=!this.latest;this.$('update').textContent=`更新到 ${u.version}`;
   }
-  syncButtons() {this.$('update').disabled=!this.latest;}
+  syncButtons() {this.$('update').disabled=!this.latest;this.$('confirm-auto').disabled=!this.autoToken;if(this.$('review'))this.syncPlanPagination();}
 }
 class Detail extends Panel {
   connectedCallback() {
@@ -145,7 +207,7 @@ class Detail extends Panel {
         <select id="unassigned"></select><div class="row"><button id="assign">关联到本番</button></div>
       </div></details>
       <div class="row"><button id="preview">预览本番整理计划</button><button id="apply" class="primary" disabled>执行此计划</button></div>
-      <div id="plan" class="plan"></div><details id="result-panel" hidden><summary>上次整理明细</summary><div id="results" class="table-scroll"></div><div class="row"><button id="result-prev">上一页</button><span id="result-page"></span><button id="result-next">下一页</button></div></details>${progressMarkup}<div id="message" role="status"></div>`);
+      ${planMarkup}<details id="result-panel" hidden><summary>上次整理明细</summary><div id="results" class="table-scroll"></div><div class="row"><button id="result-prev">上一页</button><span id="result-page"></span><button id="result-next">下一页</button></div></details>${progressMarkup}<div id="message" role="status"></div>`);
     for(const id of ['type','query','tmdb','scope'])this.$(id).oninput=()=>{this.dirty=true;this.invalidate();};
     this.action('search',async()=>{
       const rows=await this.host.api.get(`search?query=${encodeURIComponent(this.$('query').value)}&kind=${this.$('type').value}`);
@@ -181,10 +243,7 @@ class Detail extends Panel {
       this.invalidate();if(this.dirty)throw new Error('请先保存本番设置，再预览。');
       const p=await this.host.api.post(`rules/${this.rid}/preview`,{});
       this.token=p.linkable?p.token:null;
-      this.$('plan').replaceChildren(...p.items.map(i=>{
-        const el=document.createElement('div');el.className='item';el.style.whiteSpace='pre-wrap';
-        el.textContent=`${i.name}\n→ ${i.target||i.reason}${i.notice?'\n'+i.notice:''}${i.old_targets?.length?'\n旧路径：'+i.old_targets.join(', ')+'（验证新文件后，仅清理本插件管理的文件）':''}`;return el;
-      }));
+      this.renderPlan(p);
       this.message(`仅当前番：${p.linkable} 个可整理，${p.held} 个待确认。`);
     });
     this.action('apply',async()=>{
@@ -192,6 +251,7 @@ class Detail extends Panel {
       const r=await this.host.api.post(`rules/${this.rid}/apply`,{token});
       this.renderResults(r.results);this.message(summary(r.results)+'\n'+(r.collections||[]).map(x=>x.detail).join('\n')+'\n'+r.results.filter(x=>x.state==='failed').map(x=>x.detail).join('\n'));
     });
+    this.initPlan();
     this.action('result-prev',()=>{this.resultPage--;this.renderResultPage();});
     this.action('result-next',()=>{this.resultPage++;this.renderResultPage();});
     this.run(async()=>{if(!Number.isInteger(this.rid)||this.rid<1)throw new Error('无法确定当前番剧');await this.loadRule();});this.watchProgress(this.rid);
@@ -203,7 +263,7 @@ class Detail extends Panel {
     if(tmdb&&(!Number.isInteger(id)||id<1))throw new Error('请搜索或填写有效的 TMDB ID。');
     return {scope:this.$('scope').value,media_type:tmdb?this.$('type').value:this.abRule.media_type,tmdb_id:tmdb?id:null,season:this.abRule?.season??1,episode_offset:this.abRule?.episode_offset??0,episodes:{},main_file:null};
   }
-  invalidate() {this.token=null;if(this.$('apply'))this.$('apply').disabled=true;}
+  invalidate() {this.token=null;if(this.$('apply'))this.$('apply').disabled=true;if(this.$('review'))this.$('review').hidden=true;}
   async loadRule() {
     const data=await this.host.api.get(`rules/${this.rid}/library`);this.mapping=data.mapping;
     this.renderResults(data.results||[]);
@@ -229,7 +289,7 @@ class Detail extends Panel {
     const start=this.resultPage*25;
     const table=document.createElement('table'),head=table.createTHead().insertRow();
     for(const title of ['源文件','媒体库目标','处理方式','状态','说明']){const th=document.createElement('th');th.scope='col';th.textContent=title;head.append(th);}
-    const body=table.createTBody(),methods={hardlink:'硬链',reflink:'Reflink',copy:'普通复制'};
+    const body=table.createTBody(),methods={hardlink:'硬链',reflink:'Reflink',copy:'普通复制',existing:'已有文件（方式未知）'};
     for(const r of rows.slice(start,start+25)) {
       const tr=body.insertRow(),method=methods[r.method]||'—';
       const action=r.action==='relocated'?'复用副本 · '+method:r.action==='unchanged'?'已存在 · '+method:method;
@@ -272,7 +332,7 @@ class Detail extends Panel {
     this.$('main').replaceChildren(new Option(m.tmdb_id?'自动（仅单一候选时）':'自动（选取体积最大的候选正片）',''),...videos.map(f=>new Option(f.name,f.name)));
     this.$('main').value=m.main_file||'';
   }
-  syncButtons() {this.syncPagination();this.$('apply').disabled=!this.token;this.$('save-task').disabled=!this.selected();this.$('inherit').disabled=!this.selected()?.override;}
+  syncButtons() {this.syncPagination();this.syncPlanPagination();this.$('apply').disabled=!this.token;this.$('save-task').disabled=!this.selected();this.$('inherit').disabled=!this.selected()?.override;}
 }
 if(!customElements.get('ab-plugin-library-organizer'))customElements.define('ab-plugin-library-organizer',Settings);
 if(!customElements.get('ab-plugin-library-organizer-detail'))customElements.define('ab-plugin-library-organizer-detail',Detail);

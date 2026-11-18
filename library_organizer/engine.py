@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .collections import update_collections
 from .identity import from_ab
+from .legacy import discover, removed_native
 from .models import Mapping
 from .planner import build, contained, destination, fingerprint
 from .transfer import publish
@@ -87,7 +88,7 @@ class Engine:
         return self.store
 
     def settings_digest(self):
-        return digest({"layout": 7, "options": self.options.model_dump()})
+        return digest({"layout": 8, "options": self.options.model_dump()})
 
     def ownership(self, item, target):
         return next((r for r in self.store.owned(item["key"]) if r["target"] == str(target)), None)
@@ -149,34 +150,30 @@ class Engine:
                     for i in group:
                         i["target"] = None
                         i["reason"] = "不同任务目标重名；请开启版本后缀或修改映射"
-            for i in items:
-                i["old_targets"] = [
-                    r["target"] for r in self.store.owned(i["key"]) if r["target"] != i["target"]
-                ]
-                if i["target"]:
-                    try:
-                        target = destination(self.options, i["target"])
-                        if (
-                            self.options.music_root
-                            and Path(self.options.music_root).resolve() in target.parents
-                            and not Path(self.options.music_root).is_dir()
-                        ):
-                            raise ValueError("音乐库根目录不存在或尚未挂载，已保留原归档")
-                        if (
-                            target.exists()
-                            and fingerprint(target) != i["fingerprint"]
-                            and not self.valid_owned(i, target, self.ownership(i, target))
-                        ):
-                            i["reason"] = "目标已存在且不是同一源文件"
-                            i["target"] = None
-                    except ValueError as e:
-                        i["reason"] = str(e)
-                        i["target"] = None
+            layout = (
+                await self.bridge.legacy_layout() if hasattr(self.bridge, "legacy_layout") else {}
+            )
+            await asyncio.to_thread(self.describe_items, items, layout)
+            reused = {}
+            for item in items:
+                if item.get("target") and item.get("adopt"):
+                    reused.setdefault(item["adopt"]["path"], []).append(item)
+            for group in reused.values():
+                if len(group) > 1:
+                    for item in group:
+                        item.update(
+                            target=None,
+                            operation="held",
+                            reason="多个任务指向同一已有文件，需确认归属",
+                            explanation="多个任务指向同一已有文件，需确认归属",
+                        )
             blocked = {i["key"] for i in items if not i["target"]}
             for i in items:
                 if i.get("video_key") in blocked:
                     i["target"] = None
                     i["reason"] = "对应视频有冲突，暂不挂载字幕或音轨"
+                    i["operation"] = "held"
+                    i["explanation"] = i["reason"]
             payload = {
                 "items": items,
                 "rule_id": rule_id,
@@ -188,11 +185,124 @@ class Engine:
             }
             token = secrets.token_urlsafe(24)
             self.store.plan(token, payload)
+            counts = {}
+            for i in items:
+                counts[i["operation"]] = counts.get(i["operation"], 0) + 1
             return {
                 "token": token,
                 "items": items,
+                "counts": counts,
                 "linkable": sum(bool(i["target"]) for i in items),
                 "held": sum(not i["target"] for i in items),
+            }
+
+    def describe_items(self, items, layout):
+        self._progress = {
+            "state": "running",
+            "phase": "preview",
+            "rule_id": None,
+            "total": len(items),
+            "completed": 0,
+            "current": "",
+            "counts": {},
+        }
+        try:
+            for index, i in enumerate(items):
+                self._progress = {**self._progress, "current": i["name"], "completed": index}
+                i["old_targets"] = [
+                    r["target"] for r in self.store.owned(i["key"]) if r["target"] != i["target"]
+                ]
+                i["planned_target"] = i["target"]
+                i["operation"], i["explanation"] = "held", i.get("reason", "")
+                i["existing_paths"] = []
+                if i["target"]:
+                    try:
+                        target = destination(self.options, i["target"])
+                        if (
+                            self.options.music_root
+                            and Path(self.options.music_root).resolve() in target.parents
+                            and not Path(self.options.music_root).is_dir()
+                        ):
+                            raise ValueError("音乐库根目录不存在或尚未挂载，已保留原归档")
+                        ownership = self.ownership(i, target)
+                        verified = []
+                        for old in i["old_targets"]:
+                            try:
+                                path = destination(self.options, old)
+                                if path.exists() and self.valid_owned(
+                                    i, path, self.ownership(i, path)
+                                ):
+                                    verified.append(str(path))
+                            except ValueError, OSError:
+                                continue
+                        i["existing_paths"] = verified
+                        if target.exists() and self.valid_owned(i, target, ownership):
+                            i.update(
+                                operation="unchanged",
+                                explanation="目标已核验，不重新复制",
+                                existing_paths=[str(target), *verified],
+                            )
+                        elif (
+                            not target.exists()
+                            and ownership
+                            and self.store.completed(i)
+                            and not i.get("restore_missing", True)
+                        ):
+                            i.update(
+                                operation="skipped", explanation="已整理目标被移除，自动扫描不重建"
+                            )
+                        elif not target.exists() and verified:
+                            i.update(
+                                operation="reuse",
+                                explanation="复用本插件已有副本，核验新路径后清理旧路径",
+                            )
+                        elif not i.get("replay_source"):
+                            candidates = discover(i, self.options, layout, self.store)
+                            i["existing_paths"] = [r["path"] for r in candidates]
+                            if len(candidates) > 1:
+                                raise ValueError(
+                                    "找到多个相同内容的已有文件，需确认保留路径；不会自动新建或删除"
+                                )
+                            if candidates:
+                                candidate = candidates[0]
+                                i["adopt"] = candidate
+                                i.update(
+                                    operation="adopt"
+                                    if candidate["path"] != str(target)
+                                    else "adopt_existing",
+                                    explanation=candidate["proof"]
+                                    + (
+                                        "；复用并改名，不重新复制"
+                                        if candidate["path"] != str(target)
+                                        else "；接管现有文件，不重新复制"
+                                    ),
+                                )
+                            elif target.exists():
+                                raise ValueError("目标已存在且未能确认是同一源文件")
+                            elif not i.get("restore_missing", True) and removed_native(
+                                i, self.options, layout
+                            ):
+                                i.update(
+                                    operation="skipped",
+                                    explanation="AB 曾整理的文件已移除，自动整理不重建；可手动预览补链",
+                                )
+                            else:
+                                i.update(
+                                    operation="create",
+                                    explanation="未找到可复用文件；尝试硬链 → Reflink → 复制，普通复制会新增空间占用",
+                                )
+                        else:
+                            i.update(operation="create", explanation="从已验证的归档副本建立目标")
+                    except (ValueError, OSError) as e:
+                        i["reason"] = str(e)
+                        i["target"] = None
+                        i.update(operation="held", explanation=str(e))
+        finally:
+            self._progress = {
+                **self._progress,
+                "state": "completed",
+                "completed": len(items),
+                "current": "",
             }
 
     def link(self, item):
@@ -210,6 +320,39 @@ class Engine:
             dst = destination(self.options, item["target"])
             if fingerprint(src) != expected:
                 raise ValueError("源文件已变化，请重新预览")
+            if item.get("operation") == "skipped":
+                return {
+                    "key": item["key"],
+                    "state": "skipped",
+                    "changed": False,
+                    "detail": item["explanation"],
+                }
+            if item.get("operation") == "unchanged" and (
+                not dst.exists() or not self.valid_owned(item, dst, self.ownership(item, dst))
+            ):
+                raise ValueError("预览中的已有目标已变化，请重新预览")
+            if item.get("operation") == "reuse" and not any(
+                Path(old).exists()
+                and self.valid_owned(
+                    item, destination(self.options, old), self.ownership(item, old)
+                )
+                for old in item.get("existing_paths", [])
+            ):
+                raise ValueError("预览中的可复用副本已变化，未重新复制；请重新预览")
+            if item.get("adopt"):
+                candidate = item["adopt"]
+                old = destination(self.options, candidate["path"])
+                if fingerprint(old) != candidate["fingerprint"]:
+                    raise ValueError("预览中的已有文件已变化，请重新预览")
+                if any(
+                    r["key"] != item["key"] for r in self.store.owned() if r["target"] == str(old)
+                ):
+                    raise ValueError("已有文件已归属其他任务，请重新预览")
+                self.store.claim(
+                    {**item, "target": str(old)}, candidate["fingerprint"], candidate["method"]
+                )
+                if old != dst:
+                    item = {**item, "old_targets": [str(old), *item.get("old_targets", [])]}
             archive_changed = (
                 self.ensure_archive(item["archive_root"]) if item.get("archive_root") else False
             )
@@ -260,6 +403,10 @@ class Engine:
                             self.store.claim(item, fingerprint(old_path), method)
                             os.link(old_path, dst, follow_symlinks=False)
                         except OSError as error:
+                            if item.get("adopt"):
+                                raise ValueError(
+                                    "已有文件无法在媒体库内改名，已保留原文件，未重新复制"
+                                ) from error
                             if error.errno not in {errno.EXDEV, errno.EOPNOTSUPP, errno.ENOSYS}:
                                 raise
                             method = publish(
@@ -300,7 +447,12 @@ class Engine:
                     old_path.unlink()
                     self.prune_empty_music_directories(old_path.parent)
                 obsolete.append(old)
-            label = {"hardlink": "硬链", "reflink": "Reflink", "copy": "普通复制"}[method]
+            label = {
+                "hardlink": "硬链",
+                "reflink": "Reflink",
+                "copy": "普通复制",
+                "existing": "已有文件，存储方式未知",
+            }[method]
             if action == "relocated":
                 label = "复用原副本（" + label + "）"
             detail = "；".join(filter(None, (label, detail, item.get("notice"))))
@@ -346,7 +498,7 @@ class Engine:
             return False
         return True
 
-    async def apply(self, token, rule_id=None):
+    async def apply(self, token, rule_id=None, enable_automatic=False):
         async with self.replay_lock, self.lock:
             if not self.store.get("active", False):
                 raise ValueError("请先启用媒体库接管")
@@ -356,6 +508,8 @@ class Engine:
             plan = self.store.take_plan(token)
             if plan.get("rule_id") != rule_id:
                 raise ValueError("预览不属于当前番剧，请重新预览")
+            if enable_automatic and (not plan.get("automatic") or rule_id is not None):
+                raise ValueError("开启自动整理需要完整的自动整理预览")
             tasks = await self.bridge.scan(
                 rule_id=rule_id,
                 bound_only=plan.get("bound_only", False),
@@ -402,7 +556,19 @@ class Engine:
                 update_collections, self.store, self.options, plan["items"], results
             )
             self.store.set("collection_results", collections)
-            return {"results": results, "backup": backup, "collections": collections}
+            if enable_automatic:
+                if any(r["state"] == "failed" for r in results + collections):
+                    self.store.set("automatic", False)
+                else:
+                    self.store.set("automatic", True)
+                    self.store.set("retry_at", 0)
+                    self.store.set("automatic_signature", None)
+            return {
+                "results": results,
+                "backup": backup,
+                "collections": collections,
+                "automatic": self.store.get("automatic", False),
+            }
 
     async def refresh_collections(self):
         """Rebuild associations from successful history without reprocessing media."""

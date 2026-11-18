@@ -167,3 +167,20 @@ async def test_old_result_rows_expose_saved_source_and_target(api):
         row = (await client.get("/rules/1/library")).json()["results"][0]
         assert row["source"] == "/downloads/01.mkv"
         assert row["target"] == "/library/old.mkv"
+
+
+async def test_automatic_requires_review_token_but_disabling_does_not(api):
+    obj, task, client = api
+    obj.store.set("active", True)
+    obj.bridge.health = lambda: {"native_rename": False, "native_hardlink": False}
+    async with client:
+        assert (await client.post("/automatic", json={"enabled": True})).status_code == 409
+        assert not obj.store.get("automatic", False)
+        plan = (await client.post("/automatic/preview")).json()
+        assert "counts" in plan and not obj.store.get("automatic", False)
+        obj.bridge.scan.assert_awaited_with(rule_id=None, bound_only=False, associated_only=True)
+        response = await client.post("/automatic", json={"enabled": True, "token": plan["token"]})
+        assert response.status_code == 200 and response.json()["automatic"]
+        assert (await client.post("/automatic", json={"enabled": False})).json() == {
+            "automatic": False
+        }

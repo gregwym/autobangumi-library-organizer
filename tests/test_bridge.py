@@ -8,6 +8,23 @@ from library_organizer.models import Options
 from library_organizer.store import Store
 
 
+async def test_legacy_layout_reads_only_native_hardlink_records(tmp_path):
+    from module.conf import settings
+    from module.database import Database
+
+    settings.plugins.options["hardlink"] = {"source_root": "/downloads", "library_root": "/library"}
+    async with Database() as db:
+        await db.plugin_kv.set("hardlink", "link:/library/old.mkv", [[1, 2, 3, 4], [1, 5, 3, 4]])
+        await db.plugin_kv.set("other", "link:/library/foreign.mkv", [[1, 2, 3, 4], [1, 6, 3, 4]])
+    bridge = Bridge40(Options(), Store(tmp_path / "state.sqlite3"))
+    layout = await bridge.legacy_layout()
+    assert layout == {
+        "source_root": "/downloads",
+        "library_root": "/library",
+        "records": {"/library/old.mkv": [[1, 2, 3, 4], [1, 5, 3, 4]]},
+    }
+
+
 async def test_missing_download_mount_fails_before_querying_downloader(tmp_path, monkeypatch):
     from module import downloader
 

@@ -391,3 +391,35 @@ class Bridge40:
             if rule is None or rule.deleted:
                 raise ValueError("番剧不存在或已删除")
             return self.rule_data(rule)
+
+    async def legacy_layout(self):
+        """Read only the native hardlink plugin's layout and migration evidence."""
+        from module.conf import settings
+        from module.database import Database
+        from module.models.plugin_kv import PluginKV
+        from sqlmodel import select
+
+        options = settings.plugins.options.get("hardlink", {})
+        async with Database() as db:
+            rows = (
+                (
+                    await db.session.execute(
+                        select(PluginKV).where(
+                            PluginKV.plugin_id == "hardlink", PluginKV.key.startswith("link:")
+                        )
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        records = {}
+        for row in rows:
+            try:
+                records[row.key.removeprefix("link:")] = json.loads(row.value)
+            except ValueError, TypeError:
+                continue
+        return {
+            "source_root": options.get("source_root", self.options.source_root),
+            "library_root": options.get("library_root", self.options.library_root),
+            "records": records,
+        }
