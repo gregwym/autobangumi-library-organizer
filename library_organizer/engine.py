@@ -256,6 +256,22 @@ class Engine:
                                 operation="reuse",
                                 explanation="复用本插件已有副本，核验新路径后清理旧路径",
                             )
+                        elif (
+                            self.options.music_root
+                            and Path(self.options.music_root).resolve() in target.parents
+                            and any(
+                                not Path(old).is_relative_to(
+                                    Path(self.options.music_root).resolve()
+                                )
+                                and not Path(old).is_relative_to(
+                                    Path(self.options.library_root).resolve()
+                                )
+                                for old in i["old_targets"]
+                            )
+                        ):
+                            raise ValueError(
+                                "音乐目录已变更；请先在全局设置的“音乐目录已在外部移动”中核验并更新路径记录，不会重新复制"
+                            )
                         elif not i.get("replay_source"):
                             candidates = discover(i, self.options, layout, self.store)
                             i["existing_paths"] = [r["path"] for r in candidates]
@@ -527,6 +543,8 @@ class Engine:
             if health["native_rename"] or health["native_hardlink"]:
                 raise ValueError("原生整理或硬链仍启用，已停止以避免并发修改")
             plan = self.store.take_plan(token)
+            if plan.get("kind"):
+                raise ValueError("预览类型不匹配，请重新预览整理计划")
             if plan.get("rule_id") != rule_id:
                 raise ValueError("预览不属于当前番剧，请重新预览")
             if enable_automatic and (not plan.get("automatic") or rule_id is not None):
@@ -598,6 +616,51 @@ class Engine:
             results = await asyncio.to_thread(update_collections, self.store, self.options, [], [])
             self.store.set("collection_results", results)
             return {"collections": results, "backup": backup}
+
+    async def music_relocation(self, old_root=None, token=None):
+        from . import relocation
+
+        async with self.replay_lock, self.lock:
+            if not self.store.get("active", False) or self.store.get("automatic", False):
+                raise ValueError("请先接管整理并关闭自动整理，再更新已移动目录的记录")
+            if any(self.bridge.health().values()):
+                raise ValueError("请先关闭原生重命名与硬链")
+            self._progress = {
+                "state": "running",
+                "phase": "preview",
+                "rule_id": None,
+                "total": 0,
+                "completed": 0,
+                "current": "",
+                "counts": {},
+            }
+            self.store.set("progress", self._progress)
+
+            def report(completed, total, current):
+                self._progress = {
+                    **self._progress,
+                    "completed": completed,
+                    "total": total,
+                    "current": current,
+                }
+
+            operation = relocation.apply if token else relocation.preview
+            worker = asyncio.create_task(
+                asyncio.to_thread(operation, self.store, self.options, token or old_root, report)
+            )
+            try:
+                try:
+                    result = await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    await worker
+                    raise
+                self._progress = {**self._progress, "state": "completed", "current": ""}
+                return result
+            except BaseException:
+                self._progress = {**self._progress, "state": "interrupted", "current": ""}
+                raise
+            finally:
+                self.store.set("progress", self._progress)
 
     async def tick(self):
         if not self.store.get("active", False) or not self.store.get("automatic", False):

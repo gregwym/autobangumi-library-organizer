@@ -120,6 +120,12 @@ class Settings extends Panel {
       <div class="row"><span id="state" class="badge"></span><button id="activate">接管整理</button>${info('takeover','接管前备份配置，并关闭原生重命名及硬链。下载文件保留原名；关闭自动整理不删除已有入库文件。')}</div>
       <div class="row"><span id="automatic-state" class="badge" role="status"></span><button id="automatic-action">预览并开启自动整理</button>${info('automatic','默认跟随 AB 标题、年份与季集偏移，无需逐番绑定。开启前先预览并确认全部计划；之后每分钟检查新下载和历史资源。手动删除的已整理文件不自动重建，可在单番详情手动补链。')}</div>
       <div class="row"><button id="status">刷新状态</button><button id="collections">更新作品合集</button>${info('collections','校验已成功整理的记录并更新动画、电影和专辑的关联清单，不移动或复制媒体文件。新下载整理成功后自动更新。清单目录单独扫描，容器路径不同时配置合集引用路径映射。无需媒体服务器 API 凭据。')}</div>
+      <details><summary>音乐目录已在外部移动 ${info('moved','先关闭自动整理，用 DSM 等工具移动目录并调整容器挂载，在插件选项保存新音乐库路径。此处将新位置与原下载逐文件核验 SHA-256，再更新历史、归属和合集引用；不移动、重命名或复制媒体。原下载须仍可读取。任一文件校验失败则整批不更新，执行前自动备份。')}</summary><div class="body">
+        <label>原音乐库路径（AB 内路径）<input id="moved-old" placeholder="/media/anime cds/albums"></label>
+        <p>当前音乐库：<span id="moved-new"></span></p>
+        <div class="row"><button id="preview-moved">预览路径记录更新</button><button id="confirm-moved" class="primary" hidden>仅更新路径记录</button><span id="moved-state" class="badge" role="status"></span></div>
+        <div id="moved-plan" class="table-scroll" hidden></div>
+      </div></details>
       ${planMarkup}<div class="row"><button id="confirm-auto" class="primary" hidden>执行以上计划并开启自动整理</button><button id="cancel-auto" hidden>取消</button></div>
       ${progressMarkup}<div id="message" role="status"></div>
       <div class="row"><span id="version"></span><button id="check">检查更新</button><button id="update" hidden></button>${info('update','每 6 小时自动检查新版，点击一次更新。更新前备份；启动失败恢复旧代码。')}</div>
@@ -160,6 +166,32 @@ class Settings extends Panel {
       const r=await this.host.api.post('collections/refresh',{});
       this.message((r.collections||[]).map(x=>x.detail).join('\n')||'暂无可生成的作品合集。');
     });
+    this.$('moved-old').oninput=()=>{this.movedToken=null;this.$('confirm-moved').hidden=true;this.$('moved-state').textContent='';};
+    this.action('preview-moved',async()=>{
+      this.movedToken=null;this.$('confirm-moved').hidden=true;
+      this.$('moved-state').textContent='正在逐文件校验';
+      try {
+        const p=await this.host.api.post('music-relocation/preview',{old_root:this.$('moved-old').value.trim()});
+        const table=document.createElement('table'),head=table.createTHead().insertRow();
+        for(const title of ['原记录路径','实际文件路径','校验结果']){const th=document.createElement('th');th.scope='col';th.textContent=title;head.append(th);}
+        const body=table.createTBody();
+        for(const item of p.items){const row=body.insertRow();[item.old_target,item.target,item.detail].forEach((text,index)=>{const cell=row.insertCell();cell.textContent=text;if(index<2)cell.className='path';if(item.state==='held')cell.classList.add('error');});}
+        this.$('moved-plan').replaceChildren(table);this.$('moved-plan').hidden=false;
+        const verified=p.items.filter(item=>item.state==='verified').length;
+        this.$('moved-state').textContent=`校验一致 ${verified} / ${p.items.length}`;
+        this.movedToken=p.ready?p.token:null;this.$('confirm-moved').hidden=!p.ready;
+        this.message(p.ready?'校验通过，确认后仅更新记录和合集清单。':'存在未通过校验的文件；整批记录保持原样。',!p.ready);
+      } catch(error){this.$('moved-state').textContent='校验未完成';throw error;}
+    });
+    this.action('confirm-moved',async()=>{
+      const token=this.movedToken;if(!token)return;this.movedToken=null;this.$('confirm-moved').hidden=true;
+      this.$('moved-state').textContent='正在复核并更新记录';
+      try {
+        const r=await this.host.api.post('music-relocation/apply',{token});
+        await this.status();this.$('moved-state').textContent=`已更新 ${r.files} 个文件的记录`;
+        this.message(`已更新 ${r.files} 个文件的路径记录，媒体文件未移动或复制。自动整理保持关闭，请重新预览后开启。\n`+(r.collections||[]).map(x=>x.detail).join('\n'));
+      } catch(error){this.$('moved-state').textContent='更新未完成，请重新预览';throw error;}
+    });
     this.action('check',async()=>this.updateStatus(await this.host.api.post('update/check',{})));
     this.action('update',async()=>{
       this.message('正在备份并更新…');
@@ -170,6 +202,7 @@ class Settings extends Panel {
   async status() {
     const s=await this.host.api.get('status');
     this.active=s.active;this.automatic=s.automatic;
+    this.$('moved-new').textContent=s.music_root||'尚未配置';
     this.$('state').textContent=s.active?'已接管':'预览模式';
     this.$('automatic-state').textContent=s.automatic?'自动整理已开启':'自动整理已关闭';
     this.$('automatic-state').classList.toggle('enabled',s.automatic);
@@ -186,6 +219,8 @@ class Settings extends Panel {
     this.$('update').disabled=!this.latest;this.$('confirm-auto').disabled=!this.autoToken;
     this.$('automatic-action').textContent=this.automatic?'关闭自动整理':this.autoToken?'重新预览整理计划':'预览并开启自动整理';
     this.$('automatic-action').disabled=!this.active&&!this.automatic;
+    this.$('preview-moved').disabled=!this.active||this.automatic;
+    this.$('confirm-moved').disabled=!this.movedToken||this.automatic;
     if(this.$('review'))this.syncPlanPagination();
   }
 }

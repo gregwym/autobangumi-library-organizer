@@ -21,6 +21,10 @@ class TaskRequest(BaseModel):
     task_key: str = Field(min_length=1, max_length=64)
 
 
+class MovedMusic(BaseModel):
+    old_root: str = Field(min_length=1, max_length=4096)
+
+
 class UpdateRequest(BaseModel):
     version: str = Field(pattern=r"^\d+\.\d+\.\d+$", max_length=40)
 
@@ -77,6 +81,7 @@ class LibraryOrganizer(Plugin[Options]):
             return {
                 "active": self.store.get("active", False),
                 "automatic": self.store.get("automatic", False),
+                "music_root": self.config.music_root,
                 "health": self.bridge.health(),
                 "error": self.store.get("error"),
                 "results": result_rows(self.store.get("last_results", [])),
@@ -342,6 +347,20 @@ class LibraryOrganizer(Plugin[Options]):
         @router.post("/collections/refresh")
         async def refresh_collections():
             return await self.engine.refresh_collections()
+
+        @router.post("/music-relocation/preview")
+        async def moved_music_preview(body: MovedMusic):
+            try:
+                return await self.engine.music_relocation(old_root=body.old_root)
+            except (OSError, ValueError) as error:
+                raise HTTPException(409, str(error)) from error
+
+        @router.post("/music-relocation/apply")
+        async def moved_music_apply(body: Confirm):
+            try:
+                return await self.engine.music_relocation(token=body.token)
+            except (OSError, ValueError) as error:
+                raise HTTPException(409, str(error)) from error
 
         @router.get("/update")
         async def update_status():
