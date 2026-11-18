@@ -344,7 +344,8 @@ class Engine:
                     "detail": item["explanation"],
                 }
             if item.get("operation") == "unchanged" and (
-                not exists_checked(dst) or not self.valid_owned(item, dst, self.ownership(item, dst))
+                not exists_checked(dst)
+                or not self.valid_owned(item, dst, self.ownership(item, dst))
             ):
                 raise ValueError("预览中的已有目标已变化，请重新预览")
             if item.get("operation") == "reuse" and not any(
