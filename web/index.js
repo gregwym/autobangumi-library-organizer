@@ -1,7 +1,10 @@
-const css=`:host{display:block;font:14px/1.5 var(--ab-font-family,system-ui);color:var(--ab-color-text,#222)}*{box-sizing:border-box}details{border:1px solid var(--ab-color-border,#ddd);border-radius:var(--ab-radius-md,8px);overflow:hidden}summary{padding:7px 14px;font-weight:600;cursor:pointer;color:var(--ab-color-text-secondary,#666)}.body{padding:14px;background:var(--ab-color-surface,#fff);border-top:1px solid var(--ab-color-border,#ddd)}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}input,select,button,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--ab-color-border,#aaa);border-radius:6px;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.primary{background:var(--ab-color-primary,#5274d9);color:white}label{display:grid;gap:5px;margin:8px 0}label:has(input[type=checkbox]){display:flex;align-items:center;gap:8px}input[type=checkbox]{width:auto;margin:0;accent-color:var(--ab-color-primary,#526fe4)}select,textarea{max-width:100%;width:100%}textarea{min-height:70px}small,.muted{color:var(--ab-color-text-secondary,#777)}.plan{max-height:400px;overflow:auto}.item{border-bottom:1px solid var(--ab-color-border,#ddd);padding:9px 0;overflow-wrap:anywhere}#message{white-space:pre-wrap;margin-top:10px}.badge{border-radius:999px;padding:2px 9px;background:#8882}.error{color:#c65540}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;vertical-align:top;padding:9px 10px;border-bottom:1px solid var(--ab-color-border,#ddd)}th{position:sticky;top:0;background:var(--ab-color-surface,#fff)}td.path{min-width:230px;max-width:340px;overflow-wrap:anywhere;white-space:pre-wrap}td{min-width:90px}.table-scroll{overflow:auto;max-height:400px}[hidden]{display:none!important}`;
+const css=`:host{display:block;font:14px/1.5 var(--ab-font-family,system-ui);color:var(--ab-color-text,#222)}*{box-sizing:border-box}details{border:1px solid var(--ab-color-border,#ddd);border-radius:var(--ab-radius-md,8px);overflow:visible}summary{padding:7px 14px;font-weight:600;cursor:pointer;color:var(--ab-color-text-secondary,#666)}.body{padding:14px;background:var(--ab-color-surface,#fff);border-top:1px solid var(--ab-color-border,#ddd)}.row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:10px 0}input,select,button,textarea{font:inherit;color:inherit;background:transparent;border:1px solid var(--ab-color-border,#aaa);border-radius:6px;padding:7px 10px}button{cursor:pointer}button:disabled{opacity:.5;cursor:default}.primary{background:var(--ab-color-primary,#5274d9);color:white}label{display:grid;gap:5px;margin:8px 0}label:has(input[type=checkbox]){display:flex;align-items:center;gap:8px}input[type=checkbox]{width:auto;margin:0;accent-color:var(--ab-color-primary,#526fe4)}select,textarea{max-width:100%;width:100%}textarea{min-height:70px}small,.muted{color:var(--ab-color-text-secondary,#777)}.plan{max-height:400px;overflow:auto}.item{border-bottom:1px solid var(--ab-color-border,#ddd);padding:9px 0;overflow-wrap:anywhere}#message{white-space:pre-wrap;margin-top:10px}.badge{border-radius:999px;padding:2px 9px;background:#8882}.filter{border-radius:999px;padding:4px 10px}.filter[aria-pressed=true],.badge.enabled{background:var(--ab-color-primary,#5274d9);color:white;border-color:var(--ab-color-primary,#5274d9)}.help{position:relative;display:inline-flex;vertical-align:middle;font-weight:400}.info{border:0;padding:0;width:22px;height:22px;border-radius:50%;cursor:help;color:var(--ab-color-text-secondary,#777);line-height:1}.info:focus-visible{outline:2px solid var(--ab-color-primary,#5274d9);outline-offset:2px}.tooltip{display:none;position:absolute;z-index:30;top:calc(100% + 8px);left:0;width:min(360px,calc(100vw - 32px));max-height:70vh;overflow:auto;padding:10px 12px;border:1px solid var(--ab-color-border,#ddd);border-radius:8px;background:var(--ab-color-surface,#fff);color:var(--ab-color-text,#222);font:13px/1.6 var(--ab-font-family,system-ui);box-shadow:0 4px 16px #0002;white-space:normal;text-align:left;cursor:auto}.help:hover .tooltip,.help:focus-within .tooltip,.help.open .tooltip{display:block}.help.dismissed .tooltip{display:none}.error{color:#c65540}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;vertical-align:top;padding:9px 10px;border-bottom:1px solid var(--ab-color-border,#ddd)}th{position:sticky;top:0;background:var(--ab-color-surface,#fff)}td.path{min-width:230px;max-width:340px;overflow-wrap:anywhere;white-space:pre-wrap}td{min-width:90px}.table-scroll{overflow:auto;max-height:400px}[hidden]{display:none!important}`;
 const progressMarkup = `<section id="progress-panel" hidden aria-live="polite"><p id="progress-label"></p><progress aria-label="文件整理进度" id="progress-bar" max="1" value="0" style="width:100%;accent-color:var(--ab-color-primary,#5274d9)"></progress><p id="progress-current" class="muted" style="overflow-wrap:anywhere"></p><small id="progress-counts"></small></section>`;
 const operationNames={unchanged:'已有目标 · 不变',reuse:'复用已有副本',adopt:'接管旧文件 · 改名',adopt_existing:'接管已有目标',create:'新建目标',held:'待确认',skipped:'已跳过'};
-const planMarkup=`<section id="review" hidden><p id="plan-summary"></p><label>筛选预览<input id="plan-filter" type="search" placeholder="番名、路径或操作"></label><div id="plan" class="table-scroll"></div><div class="row"><button id="plan-prev">上一页</button><span id="plan-page"></span><button id="plan-next">下一页</button></div></section>`;
+function info(id,text) {
+  return `<span class="help"><button type="button" class="info" aria-label="查看说明" aria-describedby="help-${id}">ⓘ</button><span id="help-${id}" class="tooltip" role="tooltip">${text}</span></span>`;
+}
+const planMarkup=`<section id="review" hidden><div class="row"><span id="plan-summary"></span>${info('plan','筛选仅影响显示，执行仍应用完整计划。预览有效期 15 分钟；文件、配置或映射变化后须重新预览。待确认项目保持原位。')}</div><div id="plan-filters" class="row" role="group" aria-label="按预期操作筛选"></div><label>筛选预览<input id="plan-filter" type="search" placeholder="番名、路径或操作"></label><div id="plan" class="table-scroll"></div><div class="row"><button id="plan-prev">上一页</button><span id="plan-page"></span><button id="plan-next">下一页</button></div></section>`;
 const stateNames = {linked:'已整理',exists:'已有链接',held:'待确认',failed:'失败',skipped:'已跳过'};
 function summary(rows) {
   const counts={}; for(const r of rows){const key=r.action==='relocated'?'复用副本':r.state==='linked'&&r.method?({hardlink:'硬链',reflink:'Reflink',copy:'普通复制'}[r.method]||r.state):r.state;counts[key]=(counts[key]||0)+1;}
@@ -12,6 +15,23 @@ class Panel extends HTMLElement {
     if(!this.shadowRoot)this.attachShadow({mode:'open'});
     this.shadowRoot.innerHTML=`<style>${css}</style>${body}`;
     this.$=id=>this.shadowRoot.getElementById(id);
+    for(const help of this.shadowRoot.querySelectorAll('.help')) {
+      const button=help.querySelector('button'),tip=help.querySelector('.tooltip');
+      const place=()=>{
+        tip.style.left='0';tip.style.top='calc(100% + 8px)';tip.style.bottom='auto';
+        const rect=tip.getBoundingClientRect();
+        tip.style.left=Math.max(16-rect.left,Math.min(0,window.innerWidth-16-rect.right))+'px';
+        if(rect.bottom>window.innerHeight-16&&rect.height<help.getBoundingClientRect().top-16){tip.style.top='auto';tip.style.bottom='calc(100% + 8px)';}
+      };
+      help.onmouseenter=place;
+      help.onmouseleave=()=>help.classList.remove('dismissed');
+      button.onfocus=()=>{help.classList.remove('dismissed');place();};
+      button.onblur=()=>help.classList.remove('open');
+      button.onclick=event=>{
+        event.preventDefault();help.classList.remove('dismissed');help.classList.toggle('open');button.focus({preventScroll:true});place();
+      };
+      button.onkeydown=event=>{if(event.key==='Escape'){help.classList.remove('open');help.classList.add('dismissed');event.stopPropagation();}};
+    }
   }
   initPlan() {
     this.$('plan-filter').oninput=()=>{this.planPage=0;this.renderPlanPage();};
@@ -19,20 +39,27 @@ class Panel extends HTMLElement {
     this.action('plan-next',()=>{this.planPage++;this.renderPlanPage();});
   }
   renderPlan(plan) {
-    this.planRows=plan.items;this.planPage=0;this.$('plan-filter').value='';
+    this.planRows=plan.items;this.planPage=0;this.planOperation='';this.$('plan-filter').value='';
     this.$('review').hidden=false;
-    this.$('plan-summary').textContent=`完整预览：${plan.items.length} 个文件 · `+Object.entries(plan.counts||{}).map(([k,n])=>`${operationNames[k]||k} ${n}`).join(' · ');
+    this.$('plan-summary').textContent=`完整预览：${plan.items.length} 个文件`;
+    this.$('plan-filters').replaceChildren(...[['',plan.items.length],...Object.entries(plan.counts||{})].map(([operation,count])=>{
+      const button=document.createElement('button');button.type='button';button.className='filter';button.dataset.operation=operation;
+      button.textContent=`${operationNames[operation]||'全部'} ${count}`;
+      button.onclick=()=>{if(this.busy)return;this.planOperation=operation;this.planPage=0;this.renderPlanPage();};
+      return button;
+    }));
     this.renderPlanPage();
   }
   filteredPlan() {
     const q=this.$('plan-filter').value.trim().toLowerCase();
-    return (this.planRows||[]).filter(i=>!q||JSON.stringify(i).toLowerCase().includes(q)||(operationNames[i.operation]||'').includes(q));
+    return (this.planRows||[]).filter(i=>(!this.planOperation||i.operation===this.planOperation)&&(!q||JSON.stringify(i).toLowerCase().includes(q)||(operationNames[i.operation]||'').includes(q)));
   }
   syncPlanPagination() {
     this.$('plan-prev').disabled=!this.planPage;
     this.$('plan-next').disabled=(this.planPage+1)*25>=this.filteredPlan().length;
   }
   renderPlanPage() {
+    for(const button of this.$('plan-filters').querySelectorAll('button'))button.setAttribute('aria-pressed',String(button.dataset.operation===this.planOperation));
     const rows=this.filteredPlan(),total=rows.length;
     this.planPage=Math.max(0,Math.min(this.planPage||0,Math.ceil(total/25)-1));
     const start=this.planPage*25,table=document.createElement('table'),head=table.createTHead().insertRow();
@@ -89,27 +116,20 @@ class Panel extends HTMLElement {
 }
 class Settings extends Panel {
   connectedCallback() {
-    this.mount(`<details open><summary>媒体库整理 · 全局设置</summary><div class="body">
-      <p>下载根目录、视频库、可选音乐库、版本后缀和合集清单目录在插件配置中统一设置。优先硬链，不支持时依次尝试 Reflink、普通复制（占用额外空间）。</p>
-      <p class="muted">音乐库留空时先归档；配置后自动补整理已归档音乐。作品合集自动关联已入库的动画和专辑；清单目录单独扫描，容器路径不同时填写「合集引用路径映射」。插件不持有媒体服务器 API 凭据。字体、扫描图和其他附件保留原目录归档。</p><p class="muted">每部番的元数据覆盖、季集映射和整理预览，请到「番剧详情 → 媒体库」。</p>
-      <div class="row"><span id="state" class="badge"></span><button id="activate">接管整理</button></div>
-      <label><input id="automatic" type="checkbox">自动整理下载完成的番剧</label>
-      <small>默认沿用 AB 的标题、年份、类型与季集偏移，无需逐番绑定。每分钟检查完成的下载并补整理历史资源；已手动删除的入库文件只在手动整理时补链。关闭后仍可在番剧详情手动整理。</small>
-      <p class="muted">接管会备份配置并关闭原生整理与硬链。下载文件保留原名，停用自动整理不会删除已建链接。</p>
-      <div class="row"><button id="status">刷新状态</button><button id="collections">更新作品合集</button></div>
-      <small>更新合集只校验已有整理记录并重建清单，不移动或重新复制媒体文件。新下载整理成功后自动更新。</small>
+    this.mount(`<details open><summary>媒体库整理 · 全局设置 ${info('settings','目录、命名模板及版本后缀在插件选项中统一配置。优先硬链，再尝试 Reflink、普通复制；普通复制占用额外空间。音乐库留空时先归档，配置后可补整理。字体等附件保留原目录。单番纠错在番剧详情 → 媒体库。')}</summary><div class="body">
+      <div class="row"><span id="state" class="badge"></span><button id="activate">接管整理</button>${info('takeover','接管前备份配置，并关闭原生重命名及硬链。下载文件保留原名；关闭自动整理不删除已有入库文件。')}</div>
+      <div class="row"><span id="automatic-state" class="badge" role="status"></span><button id="automatic-action">预览并开启自动整理</button>${info('automatic','默认跟随 AB 标题、年份与季集偏移，无需逐番绑定。开启前先预览并确认全部计划；之后每分钟检查新下载和历史资源。手动删除的已整理文件不自动重建，可在单番详情手动补链。')}</div>
+      <div class="row"><button id="status">刷新状态</button><button id="collections">更新作品合集</button>${info('collections','校验已成功整理的记录并更新动画、电影和专辑的关联清单，不移动或复制媒体文件。新下载整理成功后自动更新。清单目录单独扫描，容器路径不同时配置合集引用路径映射。无需媒体服务器 API 凭据。')}</div>
       ${planMarkup}<div class="row"><button id="confirm-auto" class="primary" hidden>执行以上计划并开启自动整理</button><button id="cancel-auto" hidden>取消</button></div>
       ${progressMarkup}<div id="message" role="status"></div>
-      <div class="row"><span id="version"></span><button id="check">检查更新</button><button id="update" hidden></button></div>
-      <small>每 6 小时检查新版，点击一次更新；更新前备份，启动失败恢复旧代码。</small>
+      <div class="row"><span id="version"></span><button id="check">检查更新</button><button id="update" hidden></button>${info('update','每 6 小时自动检查新版，点击一次更新。更新前备份；启动失败恢复旧代码。')}</div>
     </div></details>`);
     this.action('activate',async()=>{
       if(!window.confirm('接管整理？将备份配置并关闭原生整理和硬链；本操作本身不会建立媒体链接。'))return;
       await this.host.api.post('activate',{});await this.status();
     });
-    this.$('automatic').onchange=()=>this.run(async()=>{
-      const enable=this.$('automatic').checked;
-      this.$('automatic').checked=Boolean(this.automatic);
+    this.action('automatic-action',async()=>{
+      const enable=!this.automatic;
       this.autoToken=null;
       if(enable) {
         if(!this.active)throw new Error('请先接管整理，再开启自动整理。');
@@ -117,7 +137,7 @@ class Settings extends Panel {
         const p=await this.host.api.post('automatic/preview',{});
         this.renderPlan(p);this.autoToken=p.token;
         this.$('confirm-auto').hidden=false;this.$('cancel-auto').hidden=false;
-        this.message('尚未开启。请检查完整计划，确认后才会执行；待确认项目保持原位。预览有效期 15 分钟，配置或下载变化后须重新预览。');
+        this.message('预览已生成，确认后才执行并开启。');
       } else {await this.host.api.post('automatic',{enabled:false});await this.status();}
     });
     this.initPlan();
@@ -150,7 +170,9 @@ class Settings extends Panel {
   async status() {
     const s=await this.host.api.get('status');
     this.active=s.active;this.automatic=s.automatic;
-    this.$('state').textContent=s.active?'已接管':'预览模式';this.$('automatic').checked=s.automatic;
+    this.$('state').textContent=s.active?'已接管':'预览模式';
+    this.$('automatic-state').textContent=s.automatic?'自动整理已开启':'自动整理已关闭';
+    this.$('automatic-state').classList.toggle('enabled',s.automatic);
     const reports=(s.collections||[]).map(x=>x.detail).join('\n');
     this.message(s.error||[(s.results?.length?'上次整理：'+summary(s.results):'尚未执行整理。'),reports].filter(Boolean).join('\n'),Boolean(s.error));
     this.updateStatus(s.update);
@@ -160,7 +182,12 @@ class Settings extends Panel {
     this.latest=u.available?u.version:null;
     this.$('update').hidden=!this.latest;this.$('update').textContent=`更新到 ${u.version}`;
   }
-  syncButtons() {this.$('update').disabled=!this.latest;this.$('confirm-auto').disabled=!this.autoToken;if(this.$('review'))this.syncPlanPagination();}
+  syncButtons() {
+    this.$('update').disabled=!this.latest;this.$('confirm-auto').disabled=!this.autoToken;
+    this.$('automatic-action').textContent=this.automatic?'关闭自动整理':this.autoToken?'重新预览整理计划':'预览并开启自动整理';
+    this.$('automatic-action').disabled=!this.active&&!this.automatic;
+    if(this.$('review'))this.syncPlanPagination();
+  }
 }
 class Detail extends Panel {
   connectedCallback() {
