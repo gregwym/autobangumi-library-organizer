@@ -352,6 +352,14 @@ async def test_cross_filesystem_archive_migration_and_no_overwrite(scoped, tmp_p
         raise OSError(errno.EOPNOTSUPP, "no clone")
 
     monkeypatch.setattr(os, "link", cross)
+    real_rename = transfer.rename_noreplace
+
+    def cross_rename(src, dst):
+        if Path(src) == old:
+            raise OSError(errno.EXDEV, "cross device")
+        return real_rename(src, dst)
+
+    monkeypatch.setattr("library_organizer.engine.rename_noreplace", cross_rename)
     monkeypatch.setattr(transfer, "reflink", no_clone)
     p = await x.engine.preview(rule_id=x.a.id)
     music_item = next(i for i in p["items"] if i["kind"] == "music")

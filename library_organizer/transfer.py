@@ -1,5 +1,6 @@
 """Explicit hardlink -> Linux reflink -> streamed copy, without replacing targets."""
 
+import ctypes
 import errno
 import os
 import shutil
@@ -10,6 +11,37 @@ from pathlib import Path
 from .planner import fingerprint
 
 UNSUPPORTED = {errno.EXDEV, errno.EOPNOTSUPP, errno.ENOSYS, errno.ENOTTY, errno.EINVAL}
+
+
+def rename_noreplace(src, dst):
+    """Atomically rename within the library without replacing any destination.
+
+    A read-only file owned by another UID can forbid hardlink creation even when
+    its parent directories permit renaming. Never emulate this with a racy
+    exists-check followed by os.rename(), which could overwrite another file.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    if sys.platform.startswith("linux") and hasattr(libc, "renameat2"):
+        rename = libc.renameat2
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        rename.restype = ctypes.c_int
+        result = rename(-100, os.fsencode(src), -100, os.fsencode(dst), 1)  # RENAME_NOREPLACE
+    elif sys.platform == "darwin" and hasattr(libc, "renamex_np"):
+        rename = libc.renamex_np
+        rename.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        rename.restype = ctypes.c_int
+        result = rename(os.fsencode(src), os.fsencode(dst), 4)  # RENAME_EXCL
+    else:
+        raise OSError(errno.EOPNOTSUPP, "Atomic no-replace rename unavailable")
+    if result:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error), str(src), None, str(dst))
 
 
 def reflink(src, dst):

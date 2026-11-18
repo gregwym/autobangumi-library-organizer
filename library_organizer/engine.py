@@ -12,7 +12,7 @@ from .identity import from_ab
 from .legacy import discover, removed_native
 from .models import Mapping
 from .planner import build, contained, destination, fingerprint
-from .transfer import publish
+from .transfer import publish, rename_noreplace
 
 
 def digest(value):
@@ -401,7 +401,7 @@ class Engine:
                         method = prior["method"]
                         try:
                             self.store.claim(item, fingerprint(old_path), method)
-                            os.link(old_path, dst, follow_symlinks=False)
+                            rename_noreplace(old_path, dst)
                         except OSError as error:
                             if item.get("adopt"):
                                 raise ValueError(
@@ -428,6 +428,7 @@ class Engine:
                     raise ValueError("目标文件校验失败")
             detail = ""
             obsolete = []
+            cleaned_directories = []
             # Only remove links explicitly owned by this plugin, after new link verified.
             for old in item.get("old_targets", []):
                 ownership = next(
@@ -445,7 +446,7 @@ class Engine:
                         detail = "旧路径已改变，已保留"
                         continue
                     old_path.unlink()
-                    self.prune_empty_music_directories(old_path.parent)
+                cleaned_directories.extend(self.prune_empty_directories(old_path.parent))
                 obsolete.append(old)
             label = {
                 "hardlink": "硬链",
@@ -455,7 +456,8 @@ class Engine:
             }[method]
             if action == "relocated":
                 label = "复用原副本（" + label + "）"
-            detail = "；".join(filter(None, (label, detail, item.get("notice"))))
+            cleanup = f"清理空目录 {len(cleaned_directories)} 个" if cleaned_directories else ""
+            detail = "；".join(filter(None, (label, detail, item.get("notice"), cleanup)))
             self.store.record(item, "linked", detail, obsolete=obsolete)
             return {
                 "key": item["key"],
@@ -464,23 +466,42 @@ class Engine:
                 "action": action,
                 "changed": action != "unchanged" or bool(obsolete) or archive_changed,
                 "detail": detail,
+                "cleaned_directories": cleaned_directories,
             }
         except (OSError, ValueError) as e:
             # Preserve any existing ownership record; failed plans can be retried safely.
             return {"key": item["key"], "state": "failed", "detail": str(e)}
 
-    def prune_empty_music_directories(self, directory):
-        """Remove empty old music wrappers after verified file relocation only."""
-        if not self.options.music_root:
-            return
-        root = Path(self.options.music_root).resolve()
+    def prune_empty_directories(self, directory):
+        """Prune only the old file's empty ancestors, bounded by configured roots."""
+        directory = Path(directory).absolute()
+        roots = [
+            Path(r).resolve() for r in (self.options.library_root, self.options.music_root) if r
+        ]
+        roots.sort(key=lambda r: len(r.parts), reverse=True)
+        root = next((r for r in roots if r in directory.parents), None)
+        if root is None:
+            return []
+        source = Path(self.options.source_root).resolve()
+        protected = [source, *roots]
+        if self.options.collections_root:
+            protected.append(Path(self.options.collections_root).resolve())
+        removed = []
         while root in directory.parents:
             try:
                 directory = contained(root, directory)
+                if (
+                    source == directory
+                    or source in directory.parents
+                    or any(directory == p or directory in p.parents for p in protected)
+                ):
+                    break
                 directory.rmdir()
             except OSError, ValueError:
                 break
+            removed.append(str(directory))
             directory = directory.parent
+        return removed
 
     def ensure_archive(self, root):
         root = contained(self.options.library_root, root)
