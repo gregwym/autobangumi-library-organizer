@@ -4,6 +4,8 @@
 
 [下载安装包](https://github.com/gregwym/autobangumi-library-organizer/releases/latest) · [使用与迁移](https://github.com/gregwym/autobangumi-library-organizer/blob/main/docs/USAGE.md) · [目录与合集](https://github.com/gregwym/autobangumi-library-organizer/blob/main/docs/LIBRARY_LAYOUT.md) · [AB API 提案](https://github.com/gregwym/autobangumi-library-organizer/blob/main/docs/UPSTREAM_API.md)
 
+![完整整理预览：新建、旧副本改名与已有目标（示例数据）](https://raw.githubusercontent.com/gregwym/autobangumi-library-organizer/main/docs/images/organize-preview.png)
+
 ## 功能
 
 - 默认沿用 AB 的标题、年份和季集偏移，无需逐番绑定；支持 TMDB 纠错和逐文件映射。
