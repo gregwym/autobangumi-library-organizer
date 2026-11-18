@@ -30,6 +30,15 @@ def fingerprint(path):
     return [s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns]
 
 
+def exists_checked(path):
+    """Only ENOENT means absent; Python 3.14 Path.exists hides all OSErrors."""
+    try:
+        Path(path).stat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
 def contained(root, path):
     root = Path(root).resolve()
     path = Path(path)

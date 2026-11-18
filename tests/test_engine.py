@@ -63,6 +63,77 @@ async def test_real_hardlink_idempotence_and_preview_replay(env):
     assert os.path.samefile(src, dst)
 
 
+@pytest.mark.parametrize("error", [errno.EACCES, errno.EIO, errno.ENOTDIR])
+async def test_failed_existing_target_probe_never_plans_a_copy(env, monkeypatch, error):
+    engine, _, _ = env
+    target = Path((await engine.preview())["items"][0]["target"])
+    target.parent.mkdir(parents=True)
+    target.write_bytes(b"abc")
+    original = Path.stat
+    original_exists = Path.exists
+
+    def inaccessible(path, *args, **kwargs):
+        if path == target:
+            raise OSError(error, "target probe failed", str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", inaccessible)
+    # Path.exists uses os.path.exists in 3.14, bypassing our stat mock and
+    # suppressing all OSErrors. Reproduce that result for this denied file.
+    monkeypatch.setattr(
+        Path, "exists", lambda path: False if path == target else original_exists(path)
+    )
+    assert not target.exists()
+    plan = await engine.preview()
+    assert plan["counts"] == {"held": 1}
+    assert plan["items"][0]["target"] is None
+    assert "target probe failed" in plan["items"][0]["explanation"]
+    assert target.read_bytes() == b"abc"
+
+
+async def test_unreadable_old_owned_file_blocks_new_target(env, monkeypatch):
+    engine, task, _ = env
+    initial = await engine.preview()
+    old = Path(initial["items"][0]["target"])
+    await engine.apply(initial["token"])
+    engine.store.bind(task["key"], {"tmdb_id": 1, "season": 2})
+    original = Path.stat
+
+    def inaccessible(path, *args, **kwargs):
+        if path == old:
+            raise PermissionError(errno.EACCES, "old target unreadable", str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", inaccessible)
+    plan = await engine.preview()
+    assert plan["counts"] == {"held": 1}
+    assert "old target unreadable" in plan["items"][0]["explanation"]
+    assert engine.store.owned()[0]["target"] == str(old)
+
+
+async def test_unreadable_native_mirror_is_not_treated_as_absent(env, monkeypatch):
+    engine, _, source = env
+    mirror = Path(engine.options.library_root) / source.name
+    mirror.parent.mkdir(parents=True)
+    mirror.write_bytes(source.read_bytes())
+    original = Path.stat
+    original_exists = Path.exists
+
+    def inaccessible(path, *args, **kwargs):
+        if path == mirror:
+            raise PermissionError(errno.EACCES, "native mirror unreadable", str(path))
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", inaccessible)
+    monkeypatch.setattr(
+        Path, "exists", lambda path: False if path == mirror else original_exists(path)
+    )
+    plan = await engine.preview()
+    assert plan["counts"] == {"held": 1}
+    assert "已有文件核验失败" in plan["items"][0]["explanation"]
+    assert not engine.store.owned()
+
+
 async def test_progress_is_readable_during_copy_and_survives_page_reload(env, monkeypatch):
     e, task, src = env
     plan = await e.preview(rule_id=1)

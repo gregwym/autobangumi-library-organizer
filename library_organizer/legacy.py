@@ -4,7 +4,7 @@ import hashlib
 import os
 from pathlib import Path
 
-from .planner import contained, destination, fingerprint
+from .planner import contained, destination, exists_checked, fingerprint
 
 
 def content_hash(path, expected, store):
@@ -30,7 +30,7 @@ def work_candidates(item, options):
     if not raw:
         return
     root = destination(options, raw)
-    if not root.exists():
+    if not exists_checked(root):
         return
     if not root.is_dir():
         raise ValueError("作品目录不是有效目录，无法核验已有文件")
@@ -73,7 +73,7 @@ def discover(item, options, layout, store):
     def verify(raw, record):
         try:
             path = destination(options, raw)
-            if not path.exists():
+            if not exists_checked(path):
                 return None
             fp = fingerprint(path)
             if not path.is_file() or fp[2] != expected[2]:
@@ -109,7 +109,7 @@ def removed_native(item, options, layout):
     for raw, record in layout.get("records", {}).items():
         if isinstance(record, list) and len(record) == 2 and record[0] == item["fingerprint"]:
             try:
-                if not destination(options, raw).exists():
+                if not exists_checked(destination(options, raw)):
                     return True
             except ValueError:
                 continue

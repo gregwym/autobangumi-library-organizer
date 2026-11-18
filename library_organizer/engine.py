@@ -11,7 +11,7 @@ from .collections import update_collections
 from .identity import from_ab
 from .legacy import discover, removed_native
 from .models import Mapping
-from .planner import build, contained, destination, fingerprint
+from .planner import build, contained, destination, exists_checked, fingerprint
 from .transfer import publish, rename_noreplace
 
 
@@ -229,21 +229,21 @@ class Engine:
                         for old in i["old_targets"]:
                             try:
                                 path = destination(self.options, old)
-                                if path.exists() and self.valid_owned(
+                                if exists_checked(path) and self.valid_owned(
                                     i, path, self.ownership(i, path)
                                 ):
                                     verified.append(str(path))
-                            except ValueError, OSError:
+                            except ValueError:
                                 continue
                         i["existing_paths"] = verified
-                        if target.exists() and self.valid_owned(i, target, ownership):
+                        if exists_checked(target) and self.valid_owned(i, target, ownership):
                             i.update(
                                 operation="unchanged",
                                 explanation="目标已核验，不重新复制",
                                 existing_paths=[str(target), *verified],
                             )
                         elif (
-                            not target.exists()
+                            not exists_checked(target)
                             and ownership
                             and self.store.completed(i)
                             and not i.get("restore_missing", True)
@@ -251,7 +251,7 @@ class Engine:
                             i.update(
                                 operation="skipped", explanation="已整理目标被移除，自动扫描不重建"
                             )
-                        elif not target.exists() and verified:
+                        elif not exists_checked(target) and verified:
                             i.update(
                                 operation="reuse",
                                 explanation="复用本插件已有副本，核验新路径后清理旧路径",
@@ -293,7 +293,7 @@ class Engine:
                                         else "；接管现有文件，不重新复制"
                                     ),
                                 )
-                            elif target.exists():
+                            elif exists_checked(target):
                                 raise ValueError("目标已存在且未能确认是同一源文件")
                             elif not i.get("restore_missing", True) and removed_native(
                                 i, self.options, layout
@@ -344,11 +344,11 @@ class Engine:
                     "detail": item["explanation"],
                 }
             if item.get("operation") == "unchanged" and (
-                not dst.exists() or not self.valid_owned(item, dst, self.ownership(item, dst))
+                not exists_checked(dst) or not self.valid_owned(item, dst, self.ownership(item, dst))
             ):
                 raise ValueError("预览中的已有目标已变化，请重新预览")
             if item.get("operation") == "reuse" and not any(
-                Path(old).exists()
+                exists_checked(old)
                 and self.valid_owned(
                     item, destination(self.options, old), self.ownership(item, old)
                 )
@@ -377,7 +377,7 @@ class Engine:
                     raise ValueError("音乐库根目录不存在或尚未挂载，已保留原归档")
             ownership = self.ownership(item, dst)
             if (
-                not dst.exists()
+                not exists_checked(dst)
                 and ownership
                 and json.loads(ownership["source_fingerprint"]) == item["fingerprint"]
                 and self.store.completed(item)
@@ -390,8 +390,8 @@ class Engine:
                     "detail": "已整理的目标被移除，自动扫描不重建；可手动预览补链",
                 }
             method = ownership["method"] if ownership else None
-            action = "unchanged" if dst.exists() else "created"
-            if dst.exists():
+            action = "unchanged" if exists_checked(dst) else "created"
+            if exists_checked(dst):
                 if not self.valid_owned(item, dst, ownership):
                     if fingerprint(dst) != item["fingerprint"]:
                         raise ValueError("目标已存在，未覆盖")
@@ -413,7 +413,7 @@ class Engine:
                     except ValueError:
                         continue
                     prior = self.ownership(item, old_path)
-                    if old_path.exists() and self.valid_owned(item, old_path, prior):
+                    if exists_checked(old_path) and self.valid_owned(item, old_path, prior):
                         method = prior["method"]
                         try:
                             self.store.claim(item, fingerprint(old_path), method)
@@ -457,7 +457,7 @@ class Engine:
                 except ValueError:
                     detail = "旧目录已不在配置范围，已保留"
                     continue
-                if old_path.exists():
+                if exists_checked(old_path):
                     if fingerprint(old_path) != json.loads(ownership["fingerprint"]):
                         detail = "旧路径已改变，已保留"
                         continue
