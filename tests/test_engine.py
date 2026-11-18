@@ -122,7 +122,7 @@ async def test_mapping_change_rebuilds_owned_links_only(env):
     assert os.path.samefile(new, s)
 
 
-async def test_unmanaged_existing_same_inode_never_adopted(env):
+async def test_unmanaged_target_is_only_adopted_after_fresh_review(env):
     e, t, s = env
     p = await e.preview()
     old = Path(p["items"][0]["target"])
@@ -130,11 +130,14 @@ async def test_unmanaged_existing_same_inode_never_adopted(env):
     os.link(s, old)
     result = await e.apply(p["token"])
     assert result["results"][0]["state"] == "exists"
+    assert old.exists() and not e.store.owned()
     e.store.bind(t["key"], {"tmdb_id": 1, "season": 2})
     p = await e.preview()
+    assert p["items"][0]["operation"] == "adopt"
+    assert p["items"][0]["existing_paths"] == [str(old)]
+    assert old.exists() and not e.store.owned()
     await e.apply(p["token"])
-    assert old.exists()
-    assert not any(r["target"] == str(old) for r in e.store.owned())
+    assert not old.exists() and os.path.samefile(s, p["items"][0]["target"])
 
 
 async def test_modified_owned_path_is_preserved(env):

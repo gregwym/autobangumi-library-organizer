@@ -223,6 +223,7 @@ def build(task, mapping, metadata, options):
             "reason": "",
             "task": task["key"],
             "identity": None,
+            "work_root": str(folder),
         }
         if f.get("replay_source"):
             item.update(

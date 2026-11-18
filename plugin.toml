@@ -1,7 +1,7 @@
 [plugin]
 id = "library-organizer"
 name = "媒体库整理"
-version = "0.10.1"
+version = "0.10.2"
 sdk = ">=0.6,<1"
 entry = "library_organizer.plugin:LibraryOrganizer"
 description = "下载保留原名，默认跟随 AB、可选 TMDB 纠错整理媒体库；硬链 → Reflink → 复制；状态保存在独立数据库。适配 AB 4.0.0。"

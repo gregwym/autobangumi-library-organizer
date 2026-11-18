@@ -88,7 +88,7 @@ class Engine:
         return self.store
 
     def settings_digest(self):
-        return digest({"layout": 8, "options": self.options.model_dump()})
+        return digest({"layout": 9, "options": self.options.model_dump()})
 
     def ownership(self, item, target):
         return next((r for r in self.store.owned(item["key"]) if r["target"] == str(target)), None)
