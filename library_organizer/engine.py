@@ -2,15 +2,18 @@ import asyncio
 import errno
 import hashlib
 import json
+import logging
 import os
 import secrets
 import time
 from pathlib import Path
 
+from .audit import Audit, traced
 from .collections import update_collections
 from .identity import from_ab
 from .legacy import discover, removed_native
 from .models import Mapping
+from .notifications import Notifications
 from .planner import build, contained, destination, exists_checked, fingerprint
 from .transfer import publish, rename_noreplace
 
@@ -22,7 +25,9 @@ def digest(value):
 
 
 class Engine:
-    def __init__(self, store, bridge, options):
+    def __init__(self, store, bridge, options, audit=None):
+        self.audit = audit or Audit()
+        self.notifications = Notifications(store, bridge, self.audit)
         self.store, self.bridge, self.options = store, bridge, options
         self.lock = asyncio.Lock()
         self.replay_lock = asyncio.Lock()
@@ -59,7 +64,31 @@ class Engine:
         try:
             for item in items:
                 self._progress = {**self._progress, "current": item["name"]}
+                mutating = item.get("target") and item.get("operation") not in {
+                    "unchanged",
+                    "skipped",
+                }
+                self.audit.emit(
+                    "file.start",
+                    level=logging.INFO if mutating else logging.DEBUG,
+                    key=item["key"],
+                    rule_id=item.get("rule_id"),
+                    source=item["source"],
+                    target=item.get("target"),
+                    operation=item.get("operation"),
+                )
                 result = self.link(item)
+                self.audit.emit(
+                    "file.finish",
+                    level=logging.WARNING
+                    if result["state"] == "failed"
+                    else logging.INFO
+                    if mutating or result.get("changed")
+                    else logging.DEBUG,
+                    source=item["source"],
+                    target=item.get("target"),
+                    **result,
+                )
                 results.append(result)
                 counts = dict(self._progress["counts"])
                 kind = (
@@ -113,6 +142,7 @@ class Engine:
             )
             if rule_id is not None:
                 tasks = [t for t in tasks if t.get("rule_id") == rule_id]
+            self.notifications.observe(tasks, full=rule_id is None and not bound_only)
             items = []
             mappings = {}
             for task in tasks:
@@ -188,6 +218,17 @@ class Engine:
             counts = {}
             for i in items:
                 counts[i["operation"]] = counts.get(i["operation"], 0) + 1
+            self.audit.emit(
+                "organize.preview",
+                level=logging.DEBUG if automatic else logging.INFO,
+                rule_id=rule_id,
+                automatic=automatic,
+                tasks=len(tasks),
+                files=len(items),
+                counts=counts,
+                reads=["downloads", "source/target metadata", "legacy outputs"],
+                writes=["plugin cache/preview/progress"],
+            )
             return {
                 "token": token,
                 "items": items,
@@ -418,6 +459,9 @@ class Engine:
                         method = prior["method"]
                         try:
                             self.store.claim(item, fingerprint(old_path), method)
+                            self.audit.emit(
+                                "file.move.start", source=str(old_path), target=str(dst)
+                            )
                             rename_noreplace(old_path, dst)
                         except OSError as error:
                             if item.get("adopt"):
@@ -435,6 +479,7 @@ class Engine:
                         action = "relocated"
                         break
                 else:
+                    self.audit.emit("file.publish.start", source=str(src), target=str(dst))
                     method = publish(
                         src,
                         dst,
@@ -462,7 +507,9 @@ class Engine:
                     if fingerprint(old_path) != json.loads(ownership["fingerprint"]):
                         detail = "旧路径已改变，已保留"
                         continue
+                    self.audit.emit("file.remove.start", target=str(old_path))
                     old_path.unlink()
+                    self.audit.emit("file.remove.finish", target=str(old_path))
                 cleaned_directories.extend(self.prune_empty_directories(old_path.parent))
                 obsolete.append(old)
             label = {
@@ -517,6 +564,7 @@ class Engine:
             except OSError, ValueError:
                 break
             removed.append(str(directory))
+            self.audit.emit("directory.removed", target=str(directory))
             directory = directory.parent
         return removed
 
@@ -534,8 +582,10 @@ class Engine:
             if not marker.is_file() or marker.stat().st_size:
                 raise ValueError("归档目录已有非空 .ignore，未覆盖；请确认排除规则")
             return False
+        self.audit.emit("archive.exclude.created", target=str(marker))
         return True
 
+    @traced("organize.apply")
     async def apply(self, token, rule_id=None, enable_automatic=False):
         async with self.replay_lock, self.lock:
             if not self.store.get("active", False):
@@ -596,6 +646,16 @@ class Engine:
                 update_collections, self.store, self.options, plan["items"], results
             )
             self.store.set("collection_results", collections)
+            self.log_collections(collections)
+            await self.notifications.flush()
+            self.audit.emit(
+                "organize.summary",
+                rule_id=rule_id,
+                files=len(results),
+                changed=sum(bool(r.get("changed")) for r in results),
+                failed=sum(r["state"] == "failed" for r in results),
+                counts=self._progress["counts"],
+            )
             if enable_automatic:
                 if any(r["state"] == "failed" for r in results + collections):
                     self.store.set("automatic", False)
@@ -610,14 +670,29 @@ class Engine:
                 "automatic": self.store.get("automatic", False),
             }
 
+    def log_collections(self, results):
+        for result in results:
+            self.audit.emit(
+                "collection.finish",
+                level=logging.DEBUG
+                if result["state"] == "exists"
+                else logging.WARNING
+                if result["state"] in {"failed", "held"}
+                else logging.INFO,
+                **result,
+            )
+
+    @traced("collection.refresh")
     async def refresh_collections(self):
         """Rebuild associations from successful history without reprocessing media."""
         async with self.replay_lock, self.lock:
             backup = str(self.store.backup())
             results = await asyncio.to_thread(update_collections, self.store, self.options, [], [])
             self.store.set("collection_results", results)
+            self.log_collections(results)
             return {"collections": results, "backup": backup}
 
+    @traced("music.relocation")
     async def music_relocation(self, old_root=None, token=None):
         from . import relocation
 
@@ -663,18 +738,32 @@ class Engine:
             finally:
                 self.store.set("progress", self._progress)
 
+    @traced("maintenance.organize", quiet=True)
     async def tick(self):
+        # A committed episode notice survives cancellation/restart and retries even
+        # if automatic organization has since been turned off.
+        await self.notifications.flush()
         if not self.store.get("active", False) or not self.store.get("automatic", False):
+            self.audit.periodic("maintenance.organize", state="disabled")
             return
         # Retry transient failure with bounded backoff; unchanged permanent conflicts stay visible.
         now = __import__("time").time()
         if now < self.store.get("retry_at", 0):
+            self.audit.periodic(
+                "maintenance.organize", state="backoff", retry_at=self.store.get("retry_at")
+            )
             return
         try:
             plan = await self.preview(automatic=True)
             signature = digest({"items": plan["items"], "settings": self.settings_digest()})
             last = self.store.get("automatic_signature")
             if last == signature:
+                self.audit.periodic(
+                    "maintenance.organize",
+                    state="unchanged",
+                    files=len(plan["items"]),
+                    counts=plan["counts"],
+                )
                 return
             result = await self.apply(plan["token"])
             failed = any(i.get("retryable") for i in plan["items"]) or any(
@@ -688,6 +777,19 @@ class Engine:
                 self.store.set("attempts", 0)
                 self.store.set("automatic_signature", signature)
             self.store.set("error", None)
+            self.audit.periodic(
+                "maintenance.organize",
+                state="retry" if failed else "completed",
+                files=len(plan["items"]),
+                retry_at=self.store.get("retry_at", 0),
+            )
         except Exception as e:
             self.store.set("error", str(e))
             self.store.set("retry_at", now + 300)
+            self.audit.emit(
+                "maintenance.organize.failed",
+                level=logging.WARNING,
+                error=type(e).__name__,
+                detail=str(e),
+                retry_at=now + 300,
+            )

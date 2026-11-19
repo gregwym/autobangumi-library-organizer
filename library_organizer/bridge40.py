@@ -8,12 +8,14 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from .association import Associations
+from .audit import Audit
 from .planner import VIDEO, contained, destination, fingerprint, task_key
 from .resources import MUSIC
 
 
 class Bridge40:
-    def __init__(self, options, store):
+    def __init__(self, options, store, audit=None):
+        self.audit = audit or Audit()
         self.options, self.store = options, store
         self.original = None
 
@@ -226,6 +228,7 @@ class Bridge40:
                         "key": key,
                         "instance": instance,
                         "task_id": info["hash"],
+                        "completed_at": float(info.get("completion_on") or 0),
                         "name": info["name"],
                         "rule_id": rid,
                         "association": association,
@@ -256,6 +259,15 @@ class Bridge40:
                     bound_only,
                 )
             )
+        self.audit.emit(
+            "download.scan",
+            level=10,
+            tasks=len(tasks),
+            files=sum(len(t["files"]) for t in tasks),
+            rule_id=rule_id,
+            reads=["AB history", "downloader completed tasks/files", "source file metadata"],
+            writes=["plugin task cache"],
+        )
         return tasks
 
     def archived_music(self, seen, associations, assignments, bindings, rule_id, bound_only=False):
@@ -330,12 +342,19 @@ class Bridge40:
                 )
         return recovered
 
+    async def notify_inbox(self, event):
+        # AB 4.0 has no acknowledged, inbox-only SDK method yet.
+        from module.notification.inbox import record_event
+
+        return await record_event(event)
+
     async def tmdb(self, path, params=None):
         from module.network import RequestContent
         from module.parser.analyser.tmdb_parser import _api_key, _tmdb_url
 
         params = {"api_key": _api_key(), "language": "zh-CN", **(params or {})}
         url = _tmdb_url() + "/3/" + path + "?" + urlencode(params)
+        self.audit.emit("metadata.read", level=10, endpoint=path)
         async with RequestContent() as req:
             result = await req.get_json(url)
         if not isinstance(result, dict) or result.get("success") is False:
@@ -359,6 +378,7 @@ class Bridge40:
         key = f"tmdb:{mapping.media_type}:{mapping.tmdb_id}:{mapping.season}:specials={bool(mapping.specials)}"
         cached = self.store.get(key)
         if cached and time.time() - cached["at"] < 3600:
+            self.audit.emit("metadata.cache.read", level=10, key=key)
             return cached["data"]
         data = await self.tmdb(f"{mapping.media_type}/{mapping.tmdb_id}")
         episodes = []
@@ -380,6 +400,7 @@ class Bridge40:
         if not result["title"]:
             raise ValueError("TMDB 条目没有标题")
         self.store.set(key, {"at": time.time(), "data": result})
+        self.audit.emit("metadata.cache.updated", level=10, key=key)
         return result
 
     async def rule(self, rule_id):

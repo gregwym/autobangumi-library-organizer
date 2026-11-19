@@ -5,6 +5,7 @@ from ab_sdk.tasks import ScheduledTask
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from .audit import Audit
 from .bridge40 import Bridge40
 from .engine import Engine
 from .models import Binding, Confirm, Mapping, Options
@@ -33,12 +34,18 @@ class LibraryOrganizer(Plugin[Options]):
     config_model = Options
 
     async def setup(self):
-        self.store = Store(self.ctx.data_dir / "library.sqlite3")
-        self.bridge = Bridge40(self.config, self.store)
+        self.audit = Audit(self.ctx.log)
+        self.store = Store(self.ctx.data_dir / "library.sqlite3", self.audit)
+        self.bridge = Bridge40(self.config, self.store, self.audit)
         await self.bridge.reconcile_history()
         self.bridge.setup()
-        self.engine = Engine(self.store, self.bridge, self.config)
-        self.updater = Updater(Path(__file__).resolve().parents[1], self.ctx.data_dir, self.engine)
+        self.engine = Engine(self.store, self.bridge, self.config, self.audit)
+        self.updater = Updater(
+            Path(__file__).resolve().parents[1], self.ctx.data_dir, self.engine, self.audit
+        )
+        self.audit.emit(
+            "plugin.started", organize_interval=60, update_interval=21600, inbox_notifications=True
+        )
 
     async def teardown(self):
         self.bridge.teardown()
@@ -53,7 +60,7 @@ class LibraryOrganizer(Plugin[Options]):
 
     @provider(points.API_ROUTER, id="api")
     def api(self):
-        router = APIRouter()
+        router = APIRouter(route_class=self.audit.route())
 
         def result_rows(rows):
             # Older releases kept full paths in last_items, but not in result rows.

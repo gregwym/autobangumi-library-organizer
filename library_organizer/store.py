@@ -8,7 +8,8 @@ from pathlib import Path
 
 
 class Store:
-    def __init__(self, path):
+    def __init__(self, path, audit=None):
+        self.audit = audit
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.db() as c:
@@ -20,6 +21,8 @@ class Store:
               CREATE TABLE IF NOT EXISTS files(key TEXT PRIMARY KEY,source TEXT,target TEXT,fingerprint TEXT,state TEXT,detail TEXT,updated REAL);
               CREATE TABLE IF NOT EXISTS owned(target TEXT PRIMARY KEY,key TEXT,fingerprint TEXT);
               CREATE TABLE IF NOT EXISTS transfers(target TEXT PRIMARY KEY,source_fingerprint TEXT,method TEXT);
+              CREATE TABLE IF NOT EXISTS notice_files(key TEXT PRIMARY KEY,eligible INTEGER NOT NULL);
+              CREATE TABLE IF NOT EXISTS notice_outbox(key TEXT PRIMARY KEY,payload TEXT NOT NULL,delivered INTEGER NOT NULL DEFAULT 0);
               CREATE TABLE IF NOT EXISTS plans(token TEXT PRIMARY KEY,payload TEXT NOT NULL,created REAL,used INTEGER DEFAULT 0);
             """)
 
@@ -133,6 +136,31 @@ class Store:
 
     def record(self, item, state, detail="", obsolete=()):
         with self.db() as c:
+            previous = c.execute("SELECT state FROM files WHERE key=?", (item["key"],)).fetchone()
+            watched = c.execute(
+                "SELECT eligible FROM notice_files WHERE key=?", (item["key"],)
+            ).fetchone()
+            identity = item.get("identity") or {}
+            if (
+                state == "linked"
+                and watched
+                and watched[0]
+                and not previous
+                and not item.get("adopt")
+                and identity.get("media_type") == "tv"
+            ):
+                payload = {
+                    "file_key": item["key"],
+                    "title": (item.get("collection") or {}).get("title")
+                    or Path(item["work_root"]).name,
+                    "season": identity["season"],
+                    "episode": identity["episode"],
+                    "target": item["target"],
+                }
+                c.execute(
+                    "INSERT OR IGNORE INTO notice_outbox(key,payload) VALUES (?,?)",
+                    (item["key"], json.dumps(payload, ensure_ascii=False)),
+                )
             for target in obsolete:
                 c.execute("DELETE FROM owned WHERE target=?", (target,))
                 c.execute("DELETE FROM transfers WHERE target=?", (target,))
@@ -171,7 +199,11 @@ class Store:
 
     def plan(self, token, payload):
         with self.db() as c:
-            c.execute("DELETE FROM plans WHERE created<? OR used=1", (time.time() - 900,))
+            removed = c.execute(
+                "DELETE FROM plans WHERE created<? OR used=1", (time.time() - 900,)
+            ).rowcount
+            if self.audit and removed:
+                self.audit.periodic("maintenance.expired-plans", removed=removed)
             c.execute(
                 "INSERT INTO plans VALUES (?,?,?,0)", (token, json.dumps(payload), time.time())
             )
@@ -189,6 +221,10 @@ class Store:
         out.mkdir(parents=True)
         with self.db() as src, sqlite3.connect(out / self.path.name) as dst:
             src.backup(dst)
+        if self.audit:
+            self.audit.emit(
+                "database.backup", source=str(self.path), target=str(out / self.path.name)
+            )
         return out
 
     def owned(self, key=None):

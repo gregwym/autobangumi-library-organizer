@@ -34,6 +34,7 @@ def api(tmp_path):
     obj.store = store
     obj.bridge = bridge
     obj.engine = Engine(store, bridge, options)
+    obj.audit = obj.engine.audit
     app = FastAPI()
     app.include_router(obj.api())
     return (
