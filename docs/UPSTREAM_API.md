@@ -1,6 +1,23 @@
 # AB 插件 API 需求
 
-状态：**提案，尚未提交上游 PR**。建议接口名用于说明契约，不代表 AB 已有能力。基线为 [AB 4.0.0 / bc23984](https://github.com/EstrellaXD/Auto_Bangumi/tree/bc23984ae4a6d388c0b8381e48f6aa9b60e338ba)；提交前须按目标分支复核。
+状态：**已实现并提交上游，等待 review，尚未合并**。基于 [AB 4.0-dev / bc23984](https://github.com/EstrellaXD/Auto_Bangumi/tree/bc23984ae4a6d388c0b8381e48f6aa9b60e338ba)，SDK 升为 0.7。当前插件发行版仍使用 4.0 兼容层，接口合并后再迁移。
+
+| PR | 范围 |
+| --- | --- |
+| [#1164](https://github.com/EstrellaXD/Auto_Bangumi/pull/1164) | 下载任务、准入、候选重评、独占整理、元数据、维护与本地来源更新 |
+| [#1162](https://github.com/EstrellaXD/Auto_Bangumi/pull/1162) | 定时任务 ID 按插件隔离 |
+| [#1163](https://github.com/EstrellaXD/Auto_Bangumi/pull/1163) | Shadow DOM 输入与弹窗焦点循环 |
+
+实际契约见 [SDK 服务文档](https://github.com/gregwym/Auto_Bangumi/blob/d55882392ae967b09b8d8c02cf4435b353800ca4/docs/dev/plugins/services.md)。以下保留需求及验收标准；实现采用 `ctx.downloads`、`ctx.bangumi`、`ctx.library`、`ctx.metadata`、`ctx.maintenance`、`ctx.updates`。
+
+实现边界：
+
+- 文件路径使用下载器视角，本地挂载映射由插件负责；`original_relative_path` 是首次观察的名称，不能还原接管前已被改掉的发布名。
+- 缺少可靠历史关联的旧任务保持未关联或歧义，不能仅凭标题、目录或旧标签认领。`release_ids` 可关联多条种子记录。
+- 下载结果未知时先对账，不以暂时查不到任务为由重投；缺少可核验 task ID 的后端保持阻断。
+- 原生整理仍为默认；插件整理使用独立持久账本，原生分支的旧标签兼容保留。
+- 完整启用预览、内容核验、文件移动与音乐归档继续留在插件；宿主提供维护屏障和历史清理。
+
 
 目标是让[订阅审核](https://github.com/gregwym/autobangumi-subscription-review)和[媒体库整理](https://github.com/gregwym/autobangumi-library-organizer)移除内部接口适配，同时保留原生默认行为。版本策略、音乐分类、合集 XML 和文件执行账本仍由插件维护，不要求并入宿主。
 
@@ -31,8 +48,8 @@ async def lookup_submission(idempotency_key) -> Submission | None: ...
 
 | 对象 | 必要字段 |
 | --- | --- |
-| `DownloadTask` | 稳定 `download_id`、`downloader_id`、`provider_task_id`、`bangumi_id`、`release_id`、状态及 revision |
-| `DownloadFile` | 稳定 `file_id`、相对路径、下载器路径、AB 本地映射路径、大小、选中状态、完成度及 snapshot revision |
+| `DownloadTask` | 稳定 `download_id`、`downloader_id`、`provider_task_id`、`bangumi_id`、`release_ids`、状态及 revision |
+| `DownloadFile` | 稳定 `file_id`、相对路径、下载器路径（本地挂载映射由插件负责）、大小、选中状态、完成度及 snapshot revision |
 | `Submission` | 提交键、策略 revision、`pending / accepted / rejected / unknown`、下载关联和可解释原因 |
 
 - 关联和提交意图先落库，再请求下载器；网络超时进入 `unknown`，先对账再重试。不能假设下载器原生支持幂等键。
@@ -102,7 +119,7 @@ TMDB 查询复用宿主的凭据、代理和缓存，提供 search/get/episodes�
 
 ## P1：本地来源更新
 
-建议宿主统一提供 `plugins.updates.check/install`。用户显式选择未签名本地来源后，自动检查、单击安装；官方市场继续使用原签名策略。
+实现使用 `ctx.updates.check/install`，宿主设置提供对应操作。用户显式选择未签名本地来源后，自动检查、单击安装；官方市场继续使用原签名策略。
 
 契约包括固定来源及插件身份、版本／SDK 兼容性、校验和、ZIP 路径校验、更新锁、后台任务协调、代码备份和重载失败回滚。数据迁移须声明备份和恢复办法；不能以代码回滚暗示数据已回滚，也不全局绕过验签。
 
@@ -113,18 +130,9 @@ TMDB 查询复用宿主的凭据、代理和缓存，提供 search/get/episodes�
 - `SCHEDULED_TASK` 的 provider ID 按插件隔离，调度标识使用 `<plugin_id>/<provider_id>`。验收两个插件使用同名任务，以及单独重载／卸载互不影响。
 - 弹窗焦点边界正确处理 Shadow DOM 的 `composedPath()`，同时保留 Tab 围栏和弹窗外焦点约束；覆盖键盘与嵌套组件输入。无需全局禁用焦点陷阱。
 
-## PR 拆分与迁移
+## 迁移
 
-| 顺序 | 范围 | 依赖 |
-| --- | --- | --- |
-| 1 | 定时任务作用域、Shadow DOM 焦点修复，各自独立 PR | 无 |
-| 2 | 稳定下载关联、只读任务／文件服务 | 无；原生流程保持默认 |
-| 3 | 幂等提交、统一准入、候选与重投 | 任务关联 |
-| 4 | 整理器选择、条目快照、媒体库提交事件 | 任务查询；元数据字段可分 PR |
-| 5 | 维护协调、历史清理、原生输出迁移 | 关联及 revision 契约 |
-| 6 | 本地来源更新服务 | 维护与插件生命周期 |
-
-每个 PR 包含 SDK 类型、宿主实现、契约测试、兼容说明及最小示例，不合入这两个插件的完整 UI。文件移动和音乐规则等可先留在插件，只在存在通用需求时上移。
+通用宿主服务集中在 #1164，以共享同一套持久身份、维护屏障及 SDK 版本；两项独立兼容修复分别提交。PR 包含 SDK 类型、宿主实现、故障测试、兼容说明和最小示例，不合入这两个插件的完整 UI。
 
 接口可用后，订阅审核逐项移除 `review_gate/bridge40.py` 中的下载门面、RSS 过滤和匹配包装；整理器移除 `library_organizer/bridge40.py` 中的改名守卫、配置接管、私有下载查询、TMDB 和原生 KV 读取。两个插件再将维护与更新交给宿主。
 
