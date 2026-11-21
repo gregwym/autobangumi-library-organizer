@@ -165,6 +165,8 @@ def test_numbered_title_is_distinguished_from_an_episode_range():
     release = "[Group] Example 2 [01-12][1080p]"
     assert episode("[Group] Example 2 - 12 [1080p].mkv", release) == 12
     assert episode("[Group] Example 2 - 01 - 12.mkv", release) is None
+    assert episode("[01-12][Group] Example 2 - 12.mkv", release) is None
+    assert episode("Example - 01 - 12.mkv", "[Group] Example - 01 [1080p]") is None
     assert episode("[Group] Example 2 - 12.mkv", "[Group] Another Example 20") is None
 
 

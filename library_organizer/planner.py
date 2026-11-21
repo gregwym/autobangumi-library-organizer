@@ -65,14 +65,16 @@ def episode(name, *titles):
     )
     # In "Show 2 - 01", only discard the 2 when the release, containing
     # directory or catalog independently identifies "Show 2" as a title.
-    numbered = re.match(r"^(?:[\[【][^\]】]+[\]】]\s*)*([^\[【]+?\s+\d{1,4})(?= - \d)", stem)
+    numbered = re.match(
+        r"^(?:[\[【][^\]】]+[\]】]\s*)*([^\[【]*?[^\s\[【~–—-]\s+\d{1,4})(?= - \d)", stem
+    )
     if numbered:
         title = re.escape(numbered[1].strip())
         if any(
             re.search(rf"(?<!\w){title}(?=\s*(?:$|[\[【(（]))", hint, re.I)
             for hint in (*titles, Path(name).parent.name)
         ):
-            stem = stem[numbered.end() :]
+            stem = stem[: numbered.start(1)] + stem[numbered.end() :]
     if re.search(
         r"(?i)(?:E\d{1,4}(?:\s*[-~–—至]?\s*E|\s*[-~–—至]\s*)\d{1,4}"
         r"|(?<![a-z0-9])\d{1,4}\s*[-~–—至]\s*\d{1,4})",

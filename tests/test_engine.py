@@ -63,7 +63,8 @@ async def test_real_hardlink_idempotence_and_preview_replay(env):
     assert os.path.samefile(src, dst)
 
 
-async def test_existing_pack_and_single_get_independent_targets_and_subtitles(env):
+@pytest.mark.parametrize("same_content", [False, True])
+async def test_existing_pack_and_single_get_independent_targets_and_subtitles(env, same_content):
     engine, pack, first = env
     engine.bridge.metadata.return_value = {"title": "Show", "episodes": [1, 2]}
     pack["name"] = "[Group] Show [01-02]"
@@ -90,6 +91,9 @@ async def test_existing_pack_and_single_get_independent_targets_and_subtitles(en
     sub = add_file(pack, "Show - 01.chs.ass")
     solo = add_file(single, "Show - 01.mkv")
     solo_sub = add_file(single, "Show - 01.chs.ass")
+    if same_content:
+        solo.write_bytes(first.read_bytes())
+        single["files"][0]["fingerprint"] = fingerprint(solo)
     # The old default wrote the plain group suffix for both kinds of release.
     engine.options.episode_template = "{title} S{season:02d}E{episode:02d} - {group}"
     old = await engine.preview()
