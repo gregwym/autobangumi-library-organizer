@@ -48,7 +48,7 @@ class Options(BaseModel):
         default="{title} S{season:02d}E{episode:02d}{version}",
         title="剧集文件名模板",
         max_length=512,
-        description="不含扩展名。可用 title、year、tmdb_id、season、episode、group、version、base；version 自动生成带分隔符的组名后缀。",
+        description="可用 title、year、tmdb_id、season、episode、group、version、base。version 含分隔符和组名，多集发布另加「合集」。扩展名由插件添加。",
     )
     movie_template: str = Field(
         default="{base}{version}",

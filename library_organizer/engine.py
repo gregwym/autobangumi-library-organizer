@@ -267,12 +267,14 @@ class Engine:
                             raise ValueError("音乐库根目录不存在或尚未挂载，已保留原归档")
                         ownership = self.ownership(i, target)
                         verified = []
+                        removed_owned = False
                         for old in i["old_targets"]:
                             try:
                                 path = destination(self.options, old)
-                                if exists_checked(path) and self.valid_owned(
-                                    i, path, self.ownership(i, path)
-                                ):
+                                if not exists_checked(path):
+                                    if self.store.completed({**i, "target": old}):
+                                        removed_owned = True
+                                elif self.valid_owned(i, path, self.ownership(i, path)):
                                     verified.append(str(path))
                             except ValueError:
                                 continue
@@ -285,9 +287,9 @@ class Engine:
                             )
                         elif (
                             not exists_checked(target)
-                            and ownership
-                            and self.store.completed(i)
                             and not i.get("restore_missing", True)
+                            and not verified
+                            and (removed_owned or (ownership and self.store.completed(i)))
                         ):
                             i.update(
                                 operation="skipped", explanation="已整理目标被移除，自动扫描不重建"

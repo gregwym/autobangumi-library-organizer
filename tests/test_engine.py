@@ -63,6 +63,63 @@ async def test_real_hardlink_idempotence_and_preview_replay(env):
     assert os.path.samefile(src, dst)
 
 
+async def test_existing_pack_and_single_get_independent_targets_and_subtitles(env):
+    engine, pack, first = env
+    engine.bridge.metadata.return_value = {"title": "Show", "episodes": [1, 2]}
+    pack["name"] = "[Group] Show [01-02]"
+    single = {**pack, "key": "b" * 32, "name": "[Group] Show - 01", "files": []}
+    engine.store.bind(single["key"], engine.store.binding(pack))
+
+    def add_file(task, relative):
+        directory = first.parent / task["key"]
+        directory.mkdir(exist_ok=True)
+        path = directory / relative
+        path.write_text(task["key"] + relative)
+        task["files"].append(
+            dict(
+                index=len(task["files"]),
+                name=relative,
+                source=str(path),
+                fingerprint=fingerprint(path),
+                progress=1,
+            )
+        )
+        return path
+
+    add_file(pack, "Show - 02.mkv")
+    sub = add_file(pack, "Show - 01.chs.ass")
+    solo = add_file(single, "Show - 01.mkv")
+    solo_sub = add_file(single, "Show - 01.chs.ass")
+    # The old default wrote the plain group suffix for both kinds of release.
+    engine.options.episode_template = "{title} S{season:02d}E{episode:02d} - {group}"
+    old = await engine.preview()
+    await engine.apply(old["token"])
+    old_video, removed, old_sub = (Path(i["target"]) for i in old["items"])
+    removed.unlink()  # Explicit removal from the old library must survive the upgrade.
+
+    engine.options.episode_template = Options.model_fields["episode_template"].default
+    engine.bridge.scan.return_value = [single, pack]
+    migration = await engine.preview(automatic=True)
+    assert [i["operation"] for i in migration["items"] if i["task"] == pack["key"]] == [
+        "reuse",
+        "skipped",
+        "reuse",
+    ]
+    await engine.apply(migration["token"])
+    for _ in range(2):
+        plan = await engine.preview(automatic=True)
+        await engine.apply(plan["token"])
+        assert not plan["held"]
+        assert (
+            next(i for i in plan["items"] if i["name"] == "Show - 02.mkv")["operation"] == "skipped"
+        )
+        assert os.path.samefile(solo, old_video)
+        assert os.path.samefile(solo_sub, old_sub)
+        assert os.path.samefile(first, old_video.with_name("Show S01E01 - Group 合集.mkv"))
+        assert os.path.samefile(sub, old_sub.with_name("Show S01E01 - Group 合集.zh-Hans.ass"))
+        assert not removed.with_name("Show S01E02 - Group 合集.mkv").exists()
+
+
 @pytest.mark.parametrize("error", [errno.EACCES, errno.EIO, errno.ENOTDIR])
 async def test_failed_existing_target_probe_never_plans_a_copy(env, monkeypatch, error):
     engine, _, _ = env

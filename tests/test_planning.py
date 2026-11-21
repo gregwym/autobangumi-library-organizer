@@ -146,9 +146,47 @@ def test_unknown_subtitle_not_guessed(tmp_path):
     assert "无法唯一对应" in plan[1]["notice"]
 
 
-@pytest.mark.parametrize("name", ["Show S01E01-E02.mkv", "Show S01E01-02.mkv", "Show [01-12].mkv"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "Show S01E01-E02.mkv",
+        "Show S01E01-02.mkv",
+        "Show [01-12].mkv",
+        "Show 1 - 12.mkv",
+        "Show [01 – 12].mkv",
+        "Show 第01至12话.mkv",
+    ],
+)
 def test_episode_ranges_are_not_collapsed(name):
     assert episode(name) is None
+
+
+def test_numbered_title_is_distinguished_from_an_episode_range():
+    release = "[Group] Example 2 [01-12][1080p]"
+    assert episode("[Group] Example 2 - 12 [1080p].mkv", release) == 12
+    assert episode("[Group] Example 2 - 01 - 12.mkv", release) is None
+    assert episode("[Group] Example 2 - 12.mkv", "[Group] Another Example 20") is None
+
+
+def test_pack_uses_distinct_main_episodes_even_when_one_is_unselected(tmp_path):
+    task, opts = fixture(
+        tmp_path,
+        [
+            "[Group] Example 2 - 01.mkv",
+            "[Group] Example 2 - 02.mkv",
+            "subs/[Group] Example 2 - 01.chs.ass",
+        ],
+    )
+    task["name"] = "[Group] Example 2 [01-02]"
+    task["files"][1].update(progress=0, fingerprint=None)
+    mapping = Mapping(tmdb_id=1)
+    metadata = {"title": "Example", "episodes": [1, 2]}
+    plan = build(task, mapping, metadata, opts)
+    assert Path(plan[0]["target"]).name == "Example S01E01 - Group 合集.mkv"
+    assert not plan[1]["target"]
+    assert Path(plan[2]["target"]).name == "Example S01E01 - Group 合集.zh-Hans.ass"
+    opts.version_suffix = False
+    assert Path(build(task, mapping, metadata, opts)[0]["target"]).name == "Example S01E01.mkv"
 
 
 def test_movie_main_override_can_rescue_a_classified_extra(tmp_path):

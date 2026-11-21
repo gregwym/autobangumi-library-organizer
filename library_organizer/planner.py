@@ -55,7 +55,7 @@ def contained(root, path):
     return resolved
 
 
-def episode(name):
+def episode(name, *titles):
     # No unadorned trailing number: "Hibike! Euphonium 3" is not episode 3.
     stem = Path(name).stem
     stem = re.sub(
@@ -63,7 +63,21 @@ def episode(name):
         "",
         stem,
     )
-    if re.search(r"(?i)(?:E\d{1,4}(?:[ -]*E|[-~])\d{1,4}|[\[ ]\d{1,4}\s*[-~]\s*\d{1,4})", stem):
+    # In "Show 2 - 01", only discard the 2 when the release, containing
+    # directory or catalog independently identifies "Show 2" as a title.
+    numbered = re.match(r"^(?:[\[【][^\]】]+[\]】]\s*)*([^\[【]+?\s+\d{1,4})(?= - \d)", stem)
+    if numbered:
+        title = re.escape(numbered[1].strip())
+        if any(
+            re.search(rf"(?<!\w){title}(?=\s*(?:$|[\[【(（]))", hint, re.I)
+            for hint in (*titles, Path(name).parent.name)
+        ):
+            stem = stem[numbered.end() :]
+    if re.search(
+        r"(?i)(?:E\d{1,4}(?:\s*[-~–—至]?\s*E|\s*[-~–—至]\s*)\d{1,4}"
+        r"|(?<![a-z0-9])\d{1,4}\s*[-~–—至]\s*\d{1,4})",
+        stem,
+    ):
         return None
     for pattern in [
         r"(?i)S\d{1,3}E(\d{1,4})(?![\d.])",
@@ -104,7 +118,7 @@ def destination(options, path):
     raise ValueError("目标不在当前配置的媒体库目录内")
 
 
-def sidecar_candidates(name, videos, source_episodes, *, audio=False):
+def sidecar_candidates(name, videos, source_episodes, *, titles=(), audio=False):
     """Exact relative stem first; episode fallback only for unique main videos."""
     path, stem = PurePosixPath(name), PurePosixPath(name).stem
     exact = [
@@ -122,14 +136,14 @@ def sidecar_candidates(name, videos, source_episodes, *, audio=False):
     exact = [n for n in videos if stem == Path(n).stem or stem.startswith(Path(n).stem + ".")]
     if exact:
         return exact
-    ep = episode(name)
+    ep = episode(name, *titles)
     group = version(name, "")
     return [
         n
         for n in videos
         if classify(n) == "episode"
         and ep is not None
-        and ep in {episode(n), source_episodes.get(n)}
+        and ep in {episode(n, *titles), source_episodes.get(n)}
         and (not group or not version(n, "") or group == version(n, ""))
     ]
 
@@ -208,8 +222,17 @@ def build(task, mapping, metadata, options):
 
     media = [f for f in task["files"] if classify(f["name"]) == "episode"]
     main = mapping.main_file
-    release_episode = episode(task["name"]) if len(media) == 1 else None
-    source_episodes = {}
+    titles = (task["name"], metadata["title"])
+    release_episode = episode(task["name"], metadata["title"]) if len(media) == 1 else None
+    source_episodes = {name: episode(name, *titles) for name in known_videos}
+    # Count distinct main episodes in the complete file list, including files
+    # not selected in the downloader. Extras or two encodes of E01 are not a pack.
+    episodes = {
+        mapping.episodes.get(f["name"], source_episodes[f["name"]])
+        for f in media
+        if f["name"] not in mapping.specials
+    }
+    pack = mapping.media_type == "tv" and len(episodes - {None}) > 1
     if mapping.media_type == "movie" and not main and len(media) == 1:
         main = media[0]["name"]
     elif mapping.media_type == "movie" and not main and mapping.tmdb_id is None and media:
@@ -244,8 +267,8 @@ def build(task, mapping, metadata, options):
             continue
         suffix = Path(name).suffix.lower()
         v = version(name, task["name"]) if options.version_suffix else ""
-        # Task identity stays in SQLite; visible version names contain only the group.
-        label = " - " + v if v else ""
+        edition = f"{v} 合集".strip() if pack and options.version_suffix else v
+        label = " - " + edition if edition else ""
         values = dict(
             title=title,
             year=year,
@@ -279,7 +302,7 @@ def build(task, mapping, metadata, options):
                     ep = (
                         release_episode
                         if release_episode is not None and kind == "episode"
-                        else episode(name)
+                        else source_episodes.get(name)
                     )
                     source_episodes[name] = ep
                     if (
@@ -355,7 +378,7 @@ def build(task, mapping, metadata, options):
         candidates = (
             []
             if audio and music_directory(name)
-            else sidecar_candidates(name, videos, source_episodes, audio=audio)
+            else sidecar_candidates(name, videos, source_episodes, titles=titles, audio=audio)
         )
         if audio and not candidates:
             if not music_directory(name) and (
