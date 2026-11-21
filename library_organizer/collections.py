@@ -8,7 +8,7 @@ import tempfile
 import xml.etree.ElementTree as ET
 from pathlib import Path, PurePosixPath
 
-from .planner import clean, contained, fingerprint
+from .planner import clean, contained, fingerprint, within_media_roots
 
 
 def xml_bytes(title, members):
@@ -152,16 +152,16 @@ def update_collections(store, options, items, results):
         kind = member["kind"]
         group["has_music"] |= kind == "music"
         try:
-            root = options.music_root if kind == "music" else options.library_root
-            if not root:
-                continue
-            target = contained(root, member["target"])
-            directory = contained(root, member["member"])
-            if (
-                target == directory
-                or directory not in target.parents
-                or directory == Path(root).resolve()
-            ):
+            if kind == "music":
+                roots = (options.music_root,)
+            elif kind == "movie":
+                # Keep referencing verified movies under the shared root until they move.
+                roots = options.video_roots
+            else:
+                roots = (options.library_root,)
+            target = within_media_roots(roots, member["target"])
+            directory = within_media_roots(roots, member["member"])
+            if directory not in target.parents:
                 continue
             row = owned.get(str(target))
             if row and row["key"] == key and fingerprint(target) == json.loads(row["fingerprint"]):

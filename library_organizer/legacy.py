@@ -29,27 +29,32 @@ def work_candidates(item, options):
     raw = item.get("work_root") or item.get("collection_target")
     if not raw:
         return
-    root = destination(options, raw)
-    if not exists_checked(root):
-        return
-    if not root.is_dir():
-        raise ValueError("作品目录不是有效目录，无法核验已有文件")
 
     def fail(error):
         raise error
 
+    work = Path(raw)
+    roots = [work]
+    if item.get("work_type") == "movie" and options.movie_root:
+        roots.append(Path(options.library_root) / options.movie_subdirectory / work.name)
     suffix = Path(item["source"]).suffix.lower()
-    for parent, directories, files in os.walk(root, followlinks=False, onerror=fail):
-        directories[:] = sorted(
-            name for name in directories if not (Path(parent) / name).is_symlink()
-        )
-        for name in sorted(files):
-            path = Path(parent) / name
-            if path.suffix.lower() != suffix or path.is_symlink():
-                continue
-            path = destination(options, path)
-            if path.is_file() and path.stat().st_size == item["fingerprint"][2]:
-                yield str(path)
+    for raw_root in roots:
+        root = destination(options, raw_root)
+        if not exists_checked(root):
+            continue
+        if not root.is_dir():
+            raise ValueError("作品目录不是有效目录，无法核验已有文件")
+        for parent, directories, files in os.walk(root, followlinks=False, onerror=fail):
+            directories[:] = sorted(
+                name for name in directories if not (Path(parent) / name).is_symlink()
+            )
+            for name in sorted(files):
+                path = Path(parent) / name
+                if path.suffix.lower() != suffix or path.is_symlink():
+                    continue
+                path = destination(options, path)
+                if path.is_file() and path.stat().st_size == item["fingerprint"][2]:
+                    yield str(path)
 
 
 def discover(item, options, layout, store):

@@ -14,7 +14,15 @@ from .identity import from_ab
 from .legacy import discover, removed_native
 from .models import Mapping
 from .notifications import Notifications
-from .planner import build, conflicting_claims, contained, destination, exists_checked, fingerprint
+from .planner import (
+    build,
+    conflicting_claims,
+    contained,
+    destination,
+    exists_checked,
+    fingerprint,
+    within_media_roots,
+)
 from .transfer import publish, rename_noreplace
 
 
@@ -128,6 +136,16 @@ class Engine:
             and json.loads(ownership["source_fingerprint"]) == item["fingerprint"]
             and json.loads(ownership["fingerprint"]) == fingerprint(target)
         )
+
+    def output_target(self, path):
+        target = destination(self.options, path)
+        for root, label in (
+            (self.options.movie_root, "独立电影库"),
+            (self.options.music_root, "音乐库"),
+        ):
+            if root and Path(root).resolve() in target.parents and not Path(root).is_dir():
+                raise ValueError(f"{label}根目录不存在或尚未挂载，已保留原文件")
+        return target
 
     async def resolve(self, task, raw):
         if raw and raw.get("tmdb_id"):
@@ -256,26 +274,22 @@ class Engine:
                 i["existing_paths"] = []
                 if i["target"]:
                     try:
-                        target = destination(self.options, i["target"])
-                        if (
-                            self.options.music_root
-                            and Path(self.options.music_root).resolve() in target.parents
-                            and not Path(self.options.music_root).is_dir()
-                        ):
-                            raise ValueError("音乐库根目录不存在或尚未挂载，已保留原归档")
+                        target = self.output_target(i["target"])
                         ownership = self.ownership(i, target)
                         verified = []
                         removed_owned = False
+                        inaccessible_old_target = False
                         for old in i["old_targets"]:
                             try:
                                 path = destination(self.options, old)
-                                if not exists_checked(path):
-                                    if self.store.completed({**i, "target": old}):
-                                        removed_owned = True
-                                elif self.valid_owned(i, path, self.ownership(i, path)):
-                                    verified.append(str(path))
                             except ValueError:
+                                inaccessible_old_target = True
                                 continue
+                            if not exists_checked(path):
+                                if self.store.completed({**i, "target": old}):
+                                    removed_owned = True
+                            elif self.valid_owned(i, path, self.ownership(i, path)):
+                                verified.append(str(path))
                         i["existing_paths"] = verified
                         if exists_checked(target) and self.valid_owned(i, target, ownership):
                             i.update(
@@ -293,9 +307,16 @@ class Engine:
                                 operation="skipped", explanation="已整理目标被移除，自动扫描不重建"
                             )
                         elif not exists_checked(target) and verified:
+                            explanation = "复用本插件已有副本，核验新路径后清理旧路径"
+                            if self.options.movie_root:
+                                movie_root = Path(self.options.movie_root).resolve()
+                                if movie_root in target.parents and any(
+                                    not Path(old).is_relative_to(movie_root) for old in verified
+                                ):
+                                    explanation = "优先移动已有副本，跨挂载可能需要复制；新目标核验后清理旧路径"
                             i.update(
                                 operation="reuse",
-                                explanation="复用本插件已有副本，核验新路径后清理旧路径",
+                                explanation=explanation,
                             )
                         elif (
                             self.options.music_root
@@ -304,8 +325,9 @@ class Engine:
                                 not Path(old).is_relative_to(
                                     Path(self.options.music_root).resolve()
                                 )
-                                and not Path(old).is_relative_to(
-                                    Path(self.options.library_root).resolve()
+                                and not any(
+                                    Path(old).is_relative_to(Path(root).resolve())
+                                    for root in self.options.video_roots
                                 )
                                 for old in i["old_targets"]
                             )
@@ -336,6 +358,14 @@ class Engine:
                                 )
                             elif exists_checked(target):
                                 raise ValueError("目标已存在且未能确认是同一源文件")
+                            elif (
+                                inaccessible_old_target
+                                and i.get("work_type") == "movie"
+                                and Path(i["target"]).is_relative_to(i["work_root"])
+                            ):
+                                raise ValueError(
+                                    "原电影路径不在当前可核验范围，已保留旧文件，不重复创建"
+                                )
                             elif not i.get("restore_missing", True) and removed_native(
                                 i, self.options, layout
                             ):
@@ -375,7 +405,7 @@ class Engine:
                 expected = item["replay_fingerprint"]
                 if not self.valid_owned(item, src, self.ownership(item, src)):
                     raise ValueError("归档副本所有权或内容已变化，请重新预览")
-            dst = destination(self.options, item["target"])
+            dst = self.output_target(item["target"])
             if fingerprint(src) != expected:
                 raise ValueError("源文件已变化，请重新预览")
             if item.get("operation") == "skipped":
@@ -415,9 +445,6 @@ class Engine:
             archive_changed = (
                 self.ensure_archive(item["archive_root"]) if item.get("archive_root") else False
             )
-            if self.options.music_root and Path(self.options.music_root).resolve() in dst.parents:
-                if not Path(self.options.music_root).is_dir():
-                    raise ValueError("音乐库根目录不存在或尚未挂载，已保留原归档")
             ownership = self.ownership(item, dst)
             if (
                 not exists_checked(dst)
@@ -446,6 +473,7 @@ class Engine:
                         "detail": "已有同源硬链，未接管其所有权",
                     }
             else:
+                dst = self.output_target(dst)
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst = destination(self.options, dst)
                 # A naming/mapping edit can reuse our verified existing replica
@@ -458,8 +486,9 @@ class Engine:
                     prior = self.ownership(item, old_path)
                     if exists_checked(old_path) and self.valid_owned(item, old_path, prior):
                         method = prior["method"]
+                        prior_fingerprint = json.loads(prior["fingerprint"])
                         try:
-                            self.store.claim(item, fingerprint(old_path), method)
+                            self.store.claim(item, prior_fingerprint, method)
                             self.audit.emit(
                                 "file.move.start", source=str(old_path), target=str(dst)
                             )
@@ -475,7 +504,7 @@ class Engine:
                             method = publish(
                                 old_path,
                                 dst,
-                                fingerprint(old_path),
+                                prior_fingerprint,
                                 lambda fp, mode: self.store.claim(item, fp, mode),
                             )
                         action = "relocated"
@@ -549,9 +578,7 @@ class Engine:
     def prune_empty_directories(self, directory):
         """Prune only the old file's empty ancestors, bounded by configured roots."""
         directory = Path(directory).absolute()
-        roots = [
-            Path(r).resolve() for r in (self.options.library_root, self.options.music_root) if r
-        ]
+        roots = [Path(r).resolve() for r in self.options.media_roots]
         roots.sort(key=lambda r: len(r.parts), reverse=True)
         root = next((r for r in roots if r in directory.parents), None)
         if root is None:
@@ -579,11 +606,11 @@ class Engine:
         return removed
 
     def ensure_archive(self, root):
-        root = contained(self.options.library_root, root)
+        root = within_media_roots(self.options.video_roots, root)
         if root.name != "_resources":
             raise ValueError("归档目录无效")
         root.mkdir(parents=True, exist_ok=True)
-        marker = contained(self.options.library_root, root / ".ignore")
+        marker = within_media_roots(self.options.video_roots, root / ".ignore")
         try:
             with marker.open("xb") as handle:
                 handle.flush()

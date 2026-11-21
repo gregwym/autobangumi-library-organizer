@@ -56,7 +56,7 @@ def inspect(store, options, old_root, report):
     target_root = PurePosixPath(new_root)
     if old.is_relative_to(target_root) or target_root.is_relative_to(old):
         raise ValueError("新旧音乐目录不能相同或重叠")
-    for protected in (options.source_root, options.library_root, options.collections_root):
+    for protected in (options.source_root, *options.video_roots, options.collections_root):
         if protected and (
             old.is_relative_to(protected) or PurePosixPath(protected).is_relative_to(old)
         ):

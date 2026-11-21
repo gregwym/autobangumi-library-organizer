@@ -32,11 +32,12 @@
 | --- | --- |
 | `/library/Shows` | 电视剧；按季集和同名字幕／音轨识别 |
 | `/library/Movies` | 电影；正片和特典分别处理 |
+| `/movies`（可选） | 设置 `movie_root=/movies` 时，电影作品目录直接写在此处 |
 | `/music` | 音乐；专辑识别依赖音频标签，不用番剧 TMDB 信息改标签 |
 | `/collections` | 独立混合类型辅助库，导入本地合集清单 |
 | `_resources` | 原结构归档，空 `.ignore` 排除扫描 |
 
-若 `library_root` 已经是电视剧库根目录，将 `tv_subdirectory` 留空。音乐库只扫描 `music_root`，不必扫描它的上层目录。
+若 `library_root` 已经是电视剧库根目录，将 `tv_subdirectory` 留空。独立电影库扫描 `movie_root`，音乐库扫描 `music_root`。独立电影库目录须与下载、共享视频库、音乐库和合集目录分开。
 
 ## 音乐与附件
 

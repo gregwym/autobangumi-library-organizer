@@ -27,6 +27,11 @@ class CollectionPathMap(BaseModel):
 class Options(BaseModel):
     source_root: str = Field(default="/downloads", title="下载根目录（AB 内路径）")
     library_root: str = Field(default="/library", title="媒体库根目录（AB 内路径）")
+    movie_root: str = Field(
+        default="",
+        title="独立电影库根目录（可选，AB 内路径）",
+        description="填写已存在、AB 可写的独立目录。电影作品文件夹直接放在此目录下；留空沿用媒体库根目录和电影分类子目录。",
+    )
     music_root: str = Field(
         default="",
         title="音乐库根目录（可选，AB 内路径）",
@@ -40,7 +45,7 @@ class Options(BaseModel):
     movie_subdirectory: str = Field(
         default="Movies",
         title="电影分类子目录",
-        description="若媒体库根目录已是 Jellyfin 电影库，请留空。分类目录须对应 Jellyfin 的媒体库路径。",
+        description="仅在独立电影库根目录留空时使用。若媒体库根目录已是 Jellyfin 电影库，请留空。",
     )
     path_map: list[PathMap] = Field(default_factory=list, title="下载器路径映射")
     version_suffix: bool = Field(default=True, title="媒体库文件附加版本后缀")
@@ -66,6 +71,14 @@ class Options(BaseModel):
         title="合集引用路径映射（可选）",
         description="仅转换 XML 中的路径，不移动文件。例如 AB 的 /library 对应读取方的 /media/bangumi；同路径无需配置。按完整目录前缀匹配，最长前缀优先。",
     )
+
+    @property
+    def video_roots(self):
+        return (self.library_root, self.movie_root) if self.movie_root else (self.library_root,)
+
+    @property
+    def media_roots(self):
+        return (*self.video_roots, self.music_root) if self.music_root else self.video_roots
 
     @field_validator("tv_subdirectory", "movie_subdirectory")
     @classmethod
@@ -101,15 +114,31 @@ class Options(BaseModel):
         a, b = a.resolve(), b.resolve()
         if a == b or a in b.parents or b in a.parents:
             raise ValueError("下载与媒体库目录不能重叠")
+        reserved = [a, b]
+        if self.movie_root:
+            movie = Path(self.movie_root)
+            if (
+                not movie.is_absolute()
+                or ".." in movie.parts
+                or any(c in self.movie_root for c in "\\\x00\r\n")
+            ):
+                raise ValueError("独立电影库须使用不含上级目录的绝对路径")
+            movie = movie.resolve()
+            if any(
+                movie == root or movie in root.parents or root in movie.parents for root in reserved
+            ):
+                raise ValueError("独立电影库不能与下载或共享视频库目录重叠")
+            reserved.append(movie)
         if self.music_root:
             music = Path(self.music_root)
             if not music.is_absolute():
                 raise ValueError("音乐库路径必须是绝对路径")
             music = music.resolve()
             if any(
-                music == root or music in root.parents or root in music.parents for root in (a, b)
+                music == root or music in root.parents or root in music.parents for root in reserved
             ):
                 raise ValueError("音乐库必须与下载和视频库目录分开，不能重叠")
+            reserved.append(music)
         if self.collections_root:
             collection = Path(self.collections_root)
             if not collection.is_absolute():
@@ -117,7 +146,7 @@ class Options(BaseModel):
             collection = collection.resolve()
             if any(
                 collection == root or collection in root.parents or root in collection.parents
-                for root in (a, b, *([Path(self.music_root).resolve()] if self.music_root else []))
+                for root in reserved
             ):
                 raise ValueError("合集目录不能与下载、视频库、音乐库重叠")
         for m in self.path_map:

@@ -151,8 +151,13 @@ def conflicting_claims(items):
 
 def destination(options, path):
     """Only configured roots are eligible, including when revisiting an old owned path."""
-    for root in (options.library_root, options.music_root):
-        if root and Path(root).resolve() in Path(path).absolute().parents:
+    return within_media_roots(options.media_roots, path)
+
+
+def within_media_roots(roots, path):
+    absolute = Path(path).absolute()
+    for root in roots:
+        if root and Path(root).resolve() in absolute.parents:
             return contained(root, path)
     raise ValueError("目标不在当前配置的媒体库目录内")
 
@@ -236,11 +241,12 @@ def build(task, mapping, metadata, options):
         "title": title,
     }
     root = Path(options.library_root)
-    folder = (
-        root
-        / (options.tv_subdirectory if mapping.media_type == "tv" else options.movie_subdirectory)
-        / base
-    )
+    if mapping.media_type == "tv":
+        folder = root / options.tv_subdirectory / base
+    else:
+        folder = (
+            Path(options.movie_root) if options.movie_root else root / options.movie_subdirectory
+        ) / base
     entries = []
     videos = {}
     known_videos = [
@@ -312,6 +318,7 @@ def build(task, mapping, metadata, options):
             "task": task["key"],
             "identity": None,
             "work_root": str(folder),
+            "work_type": mapping.media_type,
         }
         if f.get("replay_source"):
             item.update(
