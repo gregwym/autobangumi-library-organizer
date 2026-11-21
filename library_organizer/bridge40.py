@@ -5,12 +5,20 @@ import os
 import shutil
 import time
 from pathlib import Path
+from typing import ClassVar
 from urllib.parse import urlencode
+
+from ab_sdk.events import Event
 
 from .association import Associations
 from .audit import Audit
 from .planner import VIDEO, contained, destination, fingerprint, task_key
 from .resources import MUSIC
+
+
+class MediaLibraryChanged(Event):
+    # AB 4.0's refresh subscriber uses only the kind of this post-library-write event.
+    kind: ClassVar[str] = "hardlink.linked"
 
 
 class Bridge40:
@@ -347,6 +355,13 @@ class Bridge40:
         from module.notification.inbox import record_event
 
         return await record_event(event)
+
+    def request_media_server_refresh(self):
+        # PluginContext.bus only accepts this plugin's event namespace. Use the host
+        # publisher for the 4.0 compatibility event, without triggering source organization.
+        from module.plugin.host import publish
+
+        publish(MediaLibraryChanged())
 
     async def tmdb(self, path, params=None):
         from module.network import RequestContent

@@ -366,6 +366,7 @@ class Engine:
         if not item["target"]:
             # Keep prior ownership when a changed mapping is ambiguous or blocked.
             return {"key": item["key"], "state": "held", "detail": item["reason"]}
+        library_changed = False
         try:
             src = contained(self.options.source_root, item["source"])
             expected = item["fingerprint"]
@@ -463,6 +464,7 @@ class Engine:
                                 "file.move.start", source=str(old_path), target=str(dst)
                             )
                             rename_noreplace(old_path, dst)
+                            library_changed = "_resources" not in old_path.parts
                         except OSError as error:
                             if item.get("adopt"):
                                 raise ValueError(
@@ -488,6 +490,7 @@ class Engine:
                     )
                 if not self.valid_owned(item, dst, self.ownership(item, dst)):
                     raise ValueError("目标文件校验失败")
+                library_changed |= not item.get("archive_root")
             detail = ""
             obsolete = []
             cleaned_directories = []
@@ -509,6 +512,7 @@ class Engine:
                         continue
                     self.audit.emit("file.remove.start", target=str(old_path))
                     old_path.unlink()
+                    library_changed |= "_resources" not in old_path.parts
                     self.audit.emit("file.remove.finish", target=str(old_path))
                 cleaned_directories.extend(self.prune_empty_directories(old_path.parent))
                 obsolete.append(old)
@@ -529,12 +533,18 @@ class Engine:
                 "method": method,
                 "action": action,
                 "changed": action != "unchanged" or bool(obsolete) or archive_changed,
+                "library_changed": library_changed,
                 "detail": detail,
                 "cleaned_directories": cleaned_directories,
             }
         except (OSError, ValueError) as e:
             # Preserve any existing ownership record; failed plans can be retried safely.
-            return {"key": item["key"], "state": "failed", "detail": str(e)}
+            return {
+                "key": item["key"],
+                "state": "failed",
+                "detail": str(e),
+                "library_changed": library_changed,
+            }
 
     def prune_empty_directories(self, directory):
         """Prune only the old file's empty ancestors, bounded by configured roots."""
@@ -615,60 +625,74 @@ class Engine:
             for task in tasks:
                 if plan["mappings"].get(task["key"]) != self.store.binding(task):
                     raise ValueError("整理映射已变化，请重新预览")
-            backup = str(self.store.backup())
-            # Large copies must not block AB's HTTP/event loop. Retain the lock
-            # until the worker stops even if a client disconnects/cancels.
-            worker = asyncio.create_task(asyncio.to_thread(self.run_items, plan["items"], rule_id))
+            # Keep the lock through file writes and event publication if the caller disconnects.
+            worker = asyncio.create_task(self._apply_plan(plan, tasks, rule_id, enable_automatic))
             try:
-                results = await asyncio.shield(worker)
+                return await asyncio.shield(worker)
             except asyncio.CancelledError:
                 await worker
                 raise
-            for item, result in zip(plan["items"], results, strict=True):
-                result.update(name=item["name"], source=item["source"], target=item["target"])
-            self.store.set("last_results", results)
-            processed = {i["key"] for i in plan["items"]}
-            retained = [i for i in self.store.get("last_items", []) if i["key"] not in processed]
-            self.store.set("last_items", retained + plan["items"])
-            for rid in {t.get("rule_id") for t in tasks}:
-                if rid is None:
-                    continue
-                keys = {i["key"] for i in plan["items"] if i.get("rule_id") == rid}
-                previous = [
-                    r
-                    for r in self.store.get(f"last_results:rule:{rid}", [])
-                    if r["key"] not in keys
-                ]
-                self.store.set(
-                    f"last_results:rule:{rid}", previous + [r for r in results if r["key"] in keys]
-                )
-            collections = await asyncio.to_thread(
-                update_collections, self.store, self.options, plan["items"], results
+
+    async def _apply_plan(self, plan, tasks, rule_id, enable_automatic):
+        backup = str(self.store.backup())
+        results = await asyncio.to_thread(self.run_items, plan["items"], rule_id)
+        for item, result in zip(plan["items"], results, strict=True):
+            result.update(name=item["name"], source=item["source"], target=item["target"])
+        self.store.set("last_results", results)
+        processed = {i["key"] for i in plan["items"]}
+        retained = [i for i in self.store.get("last_items", []) if i["key"] not in processed]
+        self.store.set("last_items", retained + plan["items"])
+        for rid in {t.get("rule_id") for t in tasks}:
+            if rid is None:
+                continue
+            keys = {i["key"] for i in plan["items"] if i.get("rule_id") == rid}
+            previous = [
+                r for r in self.store.get(f"last_results:rule:{rid}", []) if r["key"] not in keys
+            ]
+            self.store.set(
+                f"last_results:rule:{rid}", previous + [r for r in results if r["key"] in keys]
             )
-            self.store.set("collection_results", collections)
-            self.log_collections(collections)
-            await self.notifications.flush()
+        collections = await asyncio.to_thread(
+            update_collections, self.store, self.options, plan["items"], results
+        )
+        self.store.set("collection_results", collections)
+        self.log_collections(collections)
+        self.request_refresh(results, collections)
+        await self.notifications.flush()
+        self.audit.emit(
+            "organize.summary",
+            rule_id=rule_id,
+            files=len(results),
+            changed=sum(bool(r.get("changed")) for r in results),
+            failed=sum(r["state"] == "failed" for r in results),
+            counts=self._progress["counts"],
+        )
+        if enable_automatic:
+            if any(r["state"] == "failed" for r in results + collections):
+                self.store.set("automatic", False)
+            else:
+                self.store.set("automatic", True)
+                self.store.set("retry_at", 0)
+                self.store.set("automatic_signature", None)
+        return {
+            "results": results,
+            "backup": backup,
+            "collections": collections,
+            "automatic": self.store.get("automatic", False),
+        }
+
+    def request_refresh(self, files, collections):
+        changed_files = sum(bool(result.get("library_changed")) for result in files)
+        changed_collections = sum(result["state"] == "written" for result in collections)
+        if (changed_files or changed_collections) and hasattr(
+            self.bridge, "request_media_server_refresh"
+        ):
+            self.bridge.request_media_server_refresh()
             self.audit.emit(
-                "organize.summary",
-                rule_id=rule_id,
-                files=len(results),
-                changed=sum(bool(r.get("changed")) for r in results),
-                failed=sum(r["state"] == "failed" for r in results),
-                counts=self._progress["counts"],
+                "media-server-refresh.requested",
+                files=changed_files,
+                collections=changed_collections,
             )
-            if enable_automatic:
-                if any(r["state"] == "failed" for r in results + collections):
-                    self.store.set("automatic", False)
-                else:
-                    self.store.set("automatic", True)
-                    self.store.set("retry_at", 0)
-                    self.store.set("automatic_signature", None)
-            return {
-                "results": results,
-                "backup": backup,
-                "collections": collections,
-                "automatic": self.store.get("automatic", False),
-            }
 
     def log_collections(self, results):
         for result in results:
@@ -690,6 +714,7 @@ class Engine:
             results = await asyncio.to_thread(update_collections, self.store, self.options, [], [])
             self.store.set("collection_results", results)
             self.log_collections(results)
+            self.request_refresh([], results)
             return {"collections": results, "backup": backup}
 
     @traced("music.relocation")
@@ -728,8 +753,12 @@ class Engine:
                 try:
                     result = await asyncio.shield(worker)
                 except asyncio.CancelledError:
-                    await worker
+                    result = await worker
+                    if token:
+                        self.request_refresh([], result["collections"])
                     raise
+                if token:
+                    self.request_refresh([], result["collections"])
                 self._progress = {**self._progress, "state": "completed", "current": ""}
                 return result
             except BaseException:
@@ -740,7 +769,7 @@ class Engine:
 
     @traced("maintenance.organize", quiet=True)
     async def tick(self):
-        # A committed episode notice survives cancellation/restart and retries even
+        # A committed notice survives cancellation/restart and retries even
         # if automatic organization has since been turned off.
         await self.notifications.flush()
         if not self.store.get("active", False) or not self.store.get("automatic", False):

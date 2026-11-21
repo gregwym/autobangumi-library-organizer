@@ -6,6 +6,8 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
+from .planner import movie_file_role
+
 
 class Store:
     def __init__(self, path, audit=None):
@@ -141,26 +143,35 @@ class Store:
                 "SELECT eligible FROM notice_files WHERE key=?", (item["key"],)
             ).fetchone()
             identity = item.get("identity") or {}
+            media_type = identity.get("media_type")
+            collection = item.get("collection") or {}
             if (
                 state == "linked"
                 and watched
                 and watched[0]
                 and not previous
                 and not item.get("adopt")
-                and identity.get("media_type") == "tv"
+                and media_type in {"tv", "movie"}
             ):
                 payload = {
-                    "file_key": item["key"],
-                    "title": (item.get("collection") or {}).get("title")
-                    or Path(item["work_root"]).name,
-                    "season": identity["season"],
-                    "episode": identity["episode"],
+                    "title": collection.get("title") or Path(item["work_root"]).name,
                     "target": item["target"],
                 }
-                c.execute(
-                    "INSERT OR IGNORE INTO notice_outbox(key,payload) VALUES (?,?)",
-                    (item["key"], json.dumps(payload, ensure_ascii=False)),
-                )
+                notice_key = None
+                if media_type == "tv":
+                    notice_key = item["key"]
+                    payload.update(
+                        file_key=notice_key, season=identity["season"], episode=identity["episode"]
+                    )
+                elif collection and movie_file_role(item["name"]) != "extra":
+                    # Use the work identity so different releases of the same movie share a notice.
+                    notice_key = collection["key"]
+                    payload.update(media_type="movie", movie_key=notice_key)
+                if notice_key:
+                    c.execute(
+                        "INSERT OR IGNORE INTO notice_outbox(key,payload) VALUES (?,?)",
+                        (notice_key, json.dumps(payload, ensure_ascii=False)),
+                    )
             for target in obsolete:
                 c.execute("DELETE FROM owned WHERE target=?", (target,))
                 c.execute("DELETE FROM transfers WHERE target=?", (target,))

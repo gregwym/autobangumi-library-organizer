@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -174,4 +175,94 @@ async def test_first_scan_with_known_old_completion_time_suppresses_backlog(env)
     inbox(engine)
     task["completed_at"] = engine.store.get("notification_since") - 3600
     await organize(engine)
+    assert await messages() == []
+
+
+def movie_files(root, names):
+    files = []
+    for index, name in enumerate(names):
+        path = root / name
+        path.write_text(name)
+        files.append(
+            {
+                "index": index,
+                "name": name,
+                "source": str(path),
+                "progress": 1,
+                "fingerprint": fingerprint(path),
+            }
+        )
+    return files
+
+
+async def test_new_movie_notifies_once_per_work_with_legacy_outbox_and_lost_ack(env):
+    engine, task, src = env
+    task.update(
+        name="[GroupA] Film",
+        completed_at=time.time() + 1,
+        files=movie_files(src.parent, ["[GroupA] Film - Movie.mkv", "[GroupA] Film - Song MV.mkv"]),
+    )
+    engine.store.bind(task["key"], {"tmdb_id": 387, "media_type": "movie"})
+    engine.bridge.metadata.return_value = {"title": "Film", "year": "2026"}
+    with engine.store.db() as db:
+        legacy = {
+            "file_key": "old-episode",
+            "title": "Old episode",
+            "season": 1,
+            "episode": 2,
+            "target": "/library/Old Episode.mkv",
+        }
+        db.execute(
+            "INSERT INTO notice_outbox(key,payload) VALUES (?,?)",
+            ("old-episode", json.dumps(legacy)),
+        )
+
+    async def lost_movie_ack(event):
+        message_id = await Bridge40.notify_inbox(engine.bridge, event)
+        if event.kind == "library-organizer.movie-ready":
+            raise OSError("lost ack")
+        return message_id
+
+    engine.bridge.notify_inbox = lost_movie_ack
+    result = await organize(engine)
+    assert all(row["state"] == "linked" for row in result["results"])
+    rows = {row.title: row for row in await messages()}
+    assert set(rows) == {"新集已入库", "电影已入库"}
+    assert rows["新集已入库"].body == "Old episode · S01E02\nOld Episode.mkv"
+    assert rows["电影已入库"].body.startswith("Film\n")
+    assert "MV" not in rows["电影已入库"].body
+    with engine.store.db() as db:
+        assert [
+            tuple(row)
+            for row in db.execute("SELECT key,delivered FROM notice_outbox ORDER BY rowid")
+        ] == [("old-episode", 1), ("movie:387", 0)]
+
+    engine = Engine(Store(engine.store.path), engine.bridge, engine.options)
+    inbox(engine)
+    await engine.tick()
+    task.update(
+        key="b" * 32,
+        name="[GroupB] Film",
+        files=movie_files(src.parent, ["[GroupB] Film - Movie.mkv"]),
+    )
+    engine.store.bind(task["key"], {"tmdb_id": 387, "media_type": "movie"})
+    assert (await organize(engine))["results"][0]["state"] == "linked"
+    assert len(await messages()) == 2
+
+
+@pytest.mark.parametrize("old", [True, False])
+async def test_old_movie_and_standalone_mv_do_not_notify(env, old):
+    engine, task, src = env
+    notify = inbox(engine)
+    task.update(
+        completed_at=time.time() + (-3600 if old else 1),
+        files=movie_files(src.parent, ["Film - Movie.mkv" if old else "Film - Song MV.mkv"]),
+    )
+    engine.store.bind(task["key"], {"media_type": "movie", "tmdb_id": 387})
+    engine.bridge.metadata.return_value = {"title": "Film"}
+    assert (await organize(engine))["results"][0]["state"] == "linked"
+    if old:
+        engine.options.movie_template = "{title} {tmdb_id}"
+        assert (await organize(engine))["results"][0]["action"] == "relocated"
+    notify.assert_not_called()
     assert await messages() == []

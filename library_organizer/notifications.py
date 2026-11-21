@@ -1,4 +1,4 @@
-"""Durable, inbox-only notices after a verified episode commit."""
+"""Durable, inbox-only notices after a verified media commit."""
 
 import asyncio
 import json
@@ -29,6 +29,21 @@ class EpisodeReady(SystemEvent):
             "新集已入库",
             f"{self.title} · S{self.season:02d}E{self.episode:02d}\n{Path(self.target).name}",
         )
+
+
+@dataclass(frozen=True, slots=True)
+class MovieReady(SystemEvent):
+    kind: ClassVar[str] = "library-organizer.movie-ready"
+    once: ClassVar[bool] = True
+    movie_key: str
+    title: str
+    target: str
+
+    def dedup_key(self):
+        return self.kind + ":" + self.movie_key
+
+    def describe(self):
+        return "电影已入库", f"{self.title}\n{Path(self.target).name}"
 
 
 class Notifications:
@@ -77,7 +92,9 @@ class Notifications:
                 "SELECT * FROM notice_outbox WHERE delivered=0 ORDER BY rowid LIMIT 100"
             ).fetchall()
         for row in rows:
-            event = EpisodeReady(**json.loads(row["payload"]))
+            payload = json.loads(row["payload"])
+            event_type = MovieReady if payload.pop("media_type", None) == "movie" else EpisodeReady
+            event = event_type(**payload)
             try:
                 message_id = await self.bridge.notify_inbox(event)
                 with self.store.db() as db:
