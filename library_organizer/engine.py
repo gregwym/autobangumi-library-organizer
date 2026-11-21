@@ -14,7 +14,7 @@ from .identity import from_ab
 from .legacy import discover, removed_native
 from .models import Mapping
 from .notifications import Notifications
-from .planner import build, contained, destination, exists_checked, fingerprint
+from .planner import build, conflicting_claims, contained, destination, exists_checked, fingerprint
 from .transfer import publish, rename_noreplace
 
 
@@ -176,10 +176,9 @@ class Engine:
                 if item["target"]:
                     by_target.setdefault(item["target"], []).append(item)
             for group in by_target.values():
-                if len(group) > 1:
-                    for i in group:
-                        i["target"] = None
-                        i["reason"] = "不同任务目标重名；请开启版本后缀或修改映射"
+                for i in conflicting_claims(group):
+                    i["target"] = None
+                    i["reason"] = "不同任务目标重名；请开启版本后缀或修改映射"
             layout = (
                 await self.bridge.legacy_layout() if hasattr(self.bridge, "legacy_layout") else {}
             )
@@ -189,14 +188,13 @@ class Engine:
                 if item.get("target") and item.get("adopt"):
                     reused.setdefault(item["adopt"]["path"], []).append(item)
             for group in reused.values():
-                if len(group) > 1:
-                    for item in group:
-                        item.update(
-                            target=None,
-                            operation="held",
-                            reason="多个任务指向同一已有文件，需确认归属",
-                            explanation="多个任务指向同一已有文件，需确认归属",
-                        )
+                for item in conflicting_claims(group):
+                    item.update(
+                        target=None,
+                        operation="held",
+                        reason="多个任务指向同一已有文件，需确认归属",
+                        explanation="多个任务指向同一已有文件，需确认归属",
+                    )
             blocked = {i["key"] for i in items if not i["target"]}
             for i in items:
                 if i.get("video_key") in blocked:

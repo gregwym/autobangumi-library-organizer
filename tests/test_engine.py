@@ -63,6 +63,39 @@ async def test_real_hardlink_idempotence_and_preview_replay(env):
     assert os.path.samefile(src, dst)
 
 
+@pytest.mark.parametrize("inferred_first", [False, True])
+async def test_inferred_movie_cannot_take_another_tasks_target(env, inferred_first):
+    engine, original, original_file = env
+    inferred = {**original, "key": "b" * 32, "files": []}
+    for name in ["Example - Movie.mkv", "Example - Music Video.mkv", "Example - Movie.chs.ass"]:
+        src = original_file.parent / name
+        src.write_text(name)
+        inferred["files"].append(
+            dict(
+                name=name,
+                source=str(src),
+                index=len(inferred["files"]),
+                fingerprint=fingerprint(src),
+                progress=1,
+            )
+        )
+    for task in [original, inferred]:
+        engine.store.bind(task["key"], {"tmdb_id": 7, "media_type": "movie"})
+    engine.bridge.scan.return_value = (
+        [inferred, original] if inferred_first else [original, inferred]
+    )
+    for _ in range(2):
+        plan = await engine.preview(automatic=True)
+        entries = {i["name"]: i for i in plan["items"]}
+        original_entry = entries[original_file.name]
+        assert original_entry["target"]
+        assert not entries["Example - Movie.mkv"]["target"]
+        assert not entries["Example - Movie.chs.ass"]["target"]
+        assert Path(entries["Example - Music Video.mkv"]["target"]).parent.name == "extras"
+        await engine.apply(plan["token"])
+        assert os.path.samefile(original_file, original_entry["target"])
+
+
 @pytest.mark.parametrize("same_content", [False, True])
 async def test_existing_pack_and_single_get_independent_targets_and_subtitles(env, same_content):
     engine, pack, first = env

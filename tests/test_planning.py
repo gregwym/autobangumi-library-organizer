@@ -104,6 +104,87 @@ def test_movie_requires_explicit_main_when_ambiguous(tmp_path):
     assert "/extras/" in plan[1]["target"]
 
 
+@pytest.mark.parametrize(
+    "feature,bonus",
+    [
+        ("North - Movie v2 [1080p].mkv", "North - Song MV v2 [2160p].mkv"),
+        ("Ocean [Main Feature].mkv", "Ocean [Music Video].mp4"),
+        ("雪【本編】.mkv", "雪【映像特典】.mkv"),
+    ],
+)
+def test_labeled_movie_matches_manual_selection(tmp_path, feature, bonus):
+    names = [bonus, "Trailer.mkv", feature, feature + ".nfo", feature[:-4] + ".chs.ass"]
+    task, opts = fixture(tmp_path, names)
+    mapping = Mapping(media_type="movie", tmdb_id=9)
+    data = {"title": "Film"}
+    automatic = build(task, mapping, data, opts)
+    manual = build(task, mapping.model_copy(update={"main_file": feature}), data, opts)
+    assert [{k: v for k, v in i.items() if k != "inferred_movie_role"} for i in automatic] == manual
+    assert all(i["target"] for i in automatic)
+    assert Path(automatic[0]["target"]).parent.name == "extras"
+    assert Path(automatic[1]["target"]).parent.name == "trailers"
+    assert automatic[2]["identity"] == {"media_type": "movie", "tmdb_id": 9}
+    assert (
+        automatic[-1]["target"]
+        == str(Path(automatic[2]["target"]).with_suffix("")) + ".zh-Hans.ass"
+    )
+
+
+@pytest.mark.parametrize(
+    "candidates",
+    [
+        ["North - Movie.mkv", "North - Movie [4K].mkv"],
+        ["North - Movie.mkv", "Unknown.mkv"],
+        ["North - Movie.mkv", "North - Director's Cut.mkv"],
+        ["North - Movie.mkv", "Music Video Club.mkv"],
+        ["[Movie] North.mkv", "North - Music Video.mp4"],
+        ["The Movie Club.mkv", "North - Song MV.mp4"],
+        ["North - Song MV.mp4", "North [MV].mkv"],
+        ["North - Movie [MV].mkv", "North - Song MV.mp4"],
+        ["Movie/North.mkv", "North - Song MV.mp4"],
+    ],
+)
+def test_movie_roles_leave_uncertain_files_held(tmp_path, candidates):
+    task, opts = fixture(tmp_path, candidates)
+    task["files"][0]["size"] = 10**10
+    plan = build(task, Mapping(media_type="movie", tmdb_id=1), {"title": "Film"}, opts)
+    assert all(not i["target"] for i in plan)
+
+
+def test_movie_roles_respect_existing_modes_and_the_complete_listing(tmp_path):
+    task, opts = fixture(tmp_path, ["North - Movie.mkv", "North - Song MV.mkv"])
+    feature, mv = task["files"]
+    feature["size"], mv["size"] = 20, 30
+    data = {"title": "North", "episodes": []}
+    mapping = Mapping(media_type="movie", tmdb_id=2)
+
+    def primary(mapping):
+        return [i["name"] for i in build(task, mapping, data, opts) if i["identity"]]
+
+    assert primary(mapping.model_copy(update={"main_file": mv["name"]})) == [mv["name"]]
+    assert primary(Mapping(media_type="movie")) == [mv["name"]]
+    assert primary(Mapping(media_type="tv", tmdb_id=2)) == []
+    assert build(task, mapping.model_copy(update={"scope": "resources"}), data, opts) == []
+    task["files"].append({**feature, "index": 2, "name": "Other cut.mkv", "progress": 0})
+    assert primary(mapping) == []
+
+
+def test_inferred_extra_cannot_displace_an_existing_extra(tmp_path):
+    names = ["Film - Movie.mkv", "Film - Song MV.mkv", "extras/Film - Song MV.mkv"]
+    task, opts = fixture(tmp_path, names)
+    plan = build(task, Mapping(media_type="movie", tmdb_id=8), {"title": "Film"}, opts)
+    assert plan[0]["identity"]["media_type"] == "movie"
+    assert not plan[1]["target"]
+    assert Path(plan[2]["target"]).parent.name == "extras"
+
+
+def test_an_unavailable_inferred_feature_does_not_publish_its_companions(tmp_path):
+    task, opts = fixture(tmp_path, ["Film - Movie.mkv", "Film - Song MV.mkv"])
+    task["files"][0].update(progress=0.5, fingerprint=None)
+    plan = build(task, Mapping(media_type="movie", tmdb_id=8), {"title": "Film"}, opts)
+    assert all(not item["target"] for item in plan)
+
+
 def test_collision_is_held_before_execution(tmp_path):
     task, opts = fixture(tmp_path, ["[A] Show - 01.mkv", "[B] Show - 01.mkv"])
     opts.version_suffix = False

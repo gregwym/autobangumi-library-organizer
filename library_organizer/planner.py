@@ -2,12 +2,15 @@
 
 import hashlib
 import re
+import unicodedata
 from pathlib import Path, PurePosixPath
 
 from .resources import AUDIO, MUSIC, cue_images, music_directory, music_notice, music_tags
 
 VIDEO = {".mkv", ".mp4", ".avi", ".m4v", ".ts", ".webm", ".mov"}
 SUBS = {".ass", ".ssa", ".srt", ".vtt", ".sup", ".sub", ".idx"}
+MAIN_LABELS = {"movie", "feature film", "main feature", "正片", "本編", "本篇"}
+BONUS_LABELS = {"mv", "music video", "bonus", "extra", "featurette", "特典", "映像特典", "花絮"}
 EXTRAS = [
     (r"(?i)\b(?:NCOP|NCED|OP|ED)(?:\d+)?\b", "extras"),
     (r"(?i)\b(?:PV|CM|trailer|teaser|preview)\s*\d*\b", "trailers"),
@@ -110,6 +113,40 @@ def classify(name):
     ):
         return "extras"
     return "episode"
+
+
+def movie_file_role(name):
+    """Read explicit role labels from the basename of an ambiguous movie candidate."""
+    stem = unicodedata.normalize("NFKC", Path(name).stem).casefold()
+    stem = stem.replace("【", "[").replace("】", "]")
+    # Leading tags normally identify the release group. Only use the final
+    # descriptor and trailing tags, so words in a film title aren't role labels.
+    stem = re.sub(r"^(?:\s*\[[^\[\]]+\]\s*)+", "", stem)
+    tags = re.search(r"(?:\s*\[[^\[\]]+\])+\s*$", stem)
+    fields = []
+    if tags:
+        fields = re.findall(r"\[([^\[\]]+)\]", tags[0])
+        stem = stem[: tags.start()]
+    description = re.split(r"\s+[-–—]\s+", stem)[-1]
+    fields.append(description)
+    roles = set()
+    for field in fields:
+        label = re.sub(r"\s+v\d+$", "", field.strip()).strip()
+        if label in MAIN_LABELS:
+            roles.add("main")
+        elif label in BONUS_LABELS or label.endswith((" mv", " music video")):
+            roles.add("extra")
+    return roles.pop() if len(roles) == 1 else None
+
+
+def conflicting_claims(items):
+    """A new inference cannot block a unique target from the ordinary plan."""
+    if len(items) < 2:
+        return []
+    established = [item for item in items if not item.get("inferred_movie_role")]
+    if len(established) == 1:
+        return [item for item in items if item is not established[0]]
+    return items
 
 
 def destination(options, path):
@@ -224,6 +261,7 @@ def build(task, mapping, metadata, options):
 
     media = [f for f in task["files"] if classify(f["name"]) == "episode"]
     main = mapping.main_file
+    inferred = False
     titles = (task["name"], metadata["title"])
     release_episode = episode(task["name"], metadata["title"]) if len(media) == 1 else None
     source_episodes = {name: episode(name, *titles) for name in known_videos}
@@ -244,6 +282,22 @@ def build(task, mapping, metadata, options):
         candidates = [f for f in media if f.get("size", 0) == largest]
         if largest > 0 and len(candidates) == 1:
             main = candidates[0]["name"]
+    elif (
+        mapping.media_type == "movie"
+        and not main
+        and mapping.tmdb_id
+        and len(media) > 1
+        and mapping.scope == "all"
+    ):
+        # Anything unexplained remains a candidate, including unselected files.
+        # Use exactly the same planning path as an explicit main_file selection.
+        roles = [(f, movie_file_role(f["name"])) for f in media]
+        candidates = [(f, role) for f, role in roles if role != "extra"]
+        if len(candidates) == 1 and candidates[0][1] == "main":
+            feature = candidates[0][0]
+            if feature.get("progress", 0) >= 1 and feature.get("fingerprint"):
+                main = feature["name"]
+                inferred = True
     for f in task["files"]:
         name = f["name"]
         kind = classify(name)
@@ -289,6 +343,8 @@ def build(task, mapping, metadata, options):
             or name == main
         ):
             if mapping.media_type == "movie":
+                if inferred and kind == "episode":
+                    item["inferred_movie_role"] = True
                 if name == main:
                     target = folder / (clean(options.movie_template.format(**values)) + suffix)
                     item["identity"] = {"media_type": "movie", "tmdb_id": mapping.tmdb_id}
@@ -425,7 +481,10 @@ def build(task, mapping, metadata, options):
         original = candidates[0]
         dst = Path(videos[original])
         item["target"] = str(dst.with_suffix("")) + sidecar_tail(name, original)
-        item["video_key"] = next(i["key"] for i in entries if i["name"] == original)
+        video = next(i for i in entries if i["name"] == original)
+        item["video_key"] = video["key"]
+        if video.get("inferred_movie_role"):
+            item["inferred_movie_role"] = True
     # A multi-disc set can use catalog numbers rather than Disc folders. Normalize
     # only sibling directories whose embedded album/artist/disc tags agree.
     music_entries = [
@@ -522,11 +581,10 @@ def build(task, mapping, metadata, options):
     for item in entries:
         if item["target"]:
             targets.setdefault(item["target"], []).append(item)
-    for items in targets.values():
-        if len(items) > 1:
-            for item in items:
-                item["reason"] = "多个源文件指向同一目标，请确认映射"
-                item["target"] = None
+    for group in targets.values():
+        for item in conflicting_claims(group):
+            item["reason"] = "多个源文件指向同一目标，请确认映射"
+            item["target"] = None
     blocked = {i["key"] for i in entries if not i["target"]}
     for item in entries:
         if item.get("video_key") in blocked:

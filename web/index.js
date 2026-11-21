@@ -391,7 +391,7 @@ class Detail extends Panel {
       const season=document.createElement('select');season.append(new Option('跟随此任务的季','regular'),new Option('特别篇 · Season 00','special'));season.value=m.specials?.[f.name]!==undefined?'special':'regular';
       label.append(season,input);return label;
     }));
-    this.$('main').replaceChildren(new Option(m.tmdb_id?'自动（仅单一候选时）':'自动（选取体积最大的候选正片）',''),...videos.map(f=>new Option(f.name,f.name)));
+    this.$('main').replaceChildren(new Option(m.tmdb_id?'自动（唯一候选或正片与花絮标注明确）':'自动（选取体积最大的候选正片）',''),...videos.map(f=>new Option(f.name,f.name)));
     this.$('main').value=m.main_file||'';
   }
   syncButtons() {this.syncPagination();this.syncPlanPagination();this.$('apply').disabled=!this.token;this.$('save-task').disabled=!this.selected();this.$('inherit').disabled=!this.selected()?.override;}
